@@ -21,10 +21,12 @@ import { z } from 'zod'
 import {
   CHANNEL_TYPE_NEW_API,
   CHANNEL_STATUS,
+  DEFAULT_MULTI_KEY_RETRY_TIMES,
   ERROR_MESSAGES,
+  MAX_MULTI_KEY_RETRY_TIMES,
   MODEL_FETCHABLE_TYPES,
 } from '../constants'
-import type { Channel } from '../types'
+import type { Channel, ClineUpstreamPin, MultiKeyStrategy } from '../types'
 import {
   CHANNEL_TYPE_ADVANCED_CUSTOM,
   advancedCustomConfigUsesRelativeUpstreamPath,
@@ -152,6 +154,15 @@ function isOptionalStatusCodeMapping(value: string | undefined): boolean {
   }
 }
 
+function isOptionalClineUpstreamPins(value: string | undefined): boolean {
+  try {
+    parseClineUpstreamPins(value)
+    return true
+  } catch {
+    return false
+  }
+}
+
 function isCodexCredential(value: string | undefined): boolean {
   try {
     const parsed = parseOptionalJson(value)
@@ -246,7 +257,13 @@ export const channelFormSchema = z
     other: z.string().optional(),
     // Multi-key options (not sent to backend directly)
     multi_key_mode: z.enum(['single', 'batch', 'multi_to_single']).optional(),
-    multi_key_type: z.enum(['random', 'polling']).optional(),
+    multi_key_type: z.enum(['random', 'polling', 'sticky']).optional(),
+    multi_key_retry_times: z
+      .number()
+      .int()
+      .min(1)
+      .max(MAX_MULTI_KEY_RETRY_TIMES)
+      .optional(),
     batch_add_set_key_prefix_2_name: z.boolean().optional(),
     key_mode: z.enum(['append', 'replace']).optional(), // For editing multi-key channels
     // Channel extra settings (stored in setting JSON, not sent directly)
@@ -261,6 +278,14 @@ export const channelFormSchema = z
     pass_through_body_enabled: z.boolean().optional(),
     system_prompt: z.string().optional(),
     system_prompt_override: z.boolean().optional(),
+    // Cline (type 61): per-model upstream pins, stored in the setting JSON
+    cline_upstream_pins: z
+      .string()
+      .optional()
+      .refine(
+        isOptionalClineUpstreamPins,
+        ERROR_MESSAGES.INVALID_CLINE_UPSTREAM_PINS
+      ),
     // Type-specific settings (stored in settings JSON)
     is_enterprise_account: z.boolean().optional(), // OpenRouter specific
     vertex_key_type: z.enum(['json', 'api_key']).optional(), // Vertex AI specific
@@ -422,6 +447,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   other: '',
   multi_key_mode: 'single',
   multi_key_type: 'random',
+  multi_key_retry_times: DEFAULT_MULTI_KEY_RETRY_TIMES,
   batch_add_set_key_prefix_2_name: false,
   key_mode: 'append',
   // Channel extra settings
@@ -433,6 +459,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   pass_through_body_enabled: false,
   system_prompt: '',
   system_prompt_override: false,
+  cline_upstream_pins: '',
   // Type-specific settings
   is_enterprise_account: false,
   vertex_key_type: 'json',
@@ -473,6 +500,7 @@ export function transformChannelToFormDefaults(
     pass_through_body_enabled: false,
     system_prompt: '',
     system_prompt_override: false,
+    cline_upstream_pins: '',
   }
 
   if (channel.setting) {
@@ -492,6 +520,9 @@ export function transformChannelToFormDefaults(
         pass_through_body_enabled: parsed.pass_through_body_enabled || false,
         system_prompt: parsed.system_prompt || '',
         system_prompt_override: parsed.system_prompt_override || false,
+        cline_upstream_pins: parsed.cline_upstream_pins
+          ? JSON.stringify(parsed.cline_upstream_pins, null, 2)
+          : '',
       }
     } catch (error) {
       // eslint-disable-next-line no-console
@@ -573,7 +604,12 @@ export function transformChannelToFormDefaults(
     settings: channel.settings || '{}',
     other: channel.other || '',
     multi_key_mode: 'single',
-    multi_key_type: channel.channel_info.multi_key_mode || 'random',
+    // Multi-key channels created through the API may carry no explicit strategy;
+    // the backend then falls back to the first enabled key, which is sticky.
+    multi_key_type: channel.channel_info.multi_key_mode || 'sticky',
+    multi_key_retry_times:
+      channel.channel_info.multi_key_retry_times ||
+      DEFAULT_MULTI_KEY_RETRY_TIMES,
     batch_add_set_key_prefix_2_name: false,
     key_mode: 'append', // Default to append mode for editing multi-key channels
     // Channel extra settings
@@ -596,6 +632,81 @@ export function transformChannelToFormDefaults(
     upstream_model_update_ignored_models: upstreamModelUpdateIgnoredModels,
     advanced_custom: advancedCustom,
   }
+}
+
+export type { ClineUpstreamPin }
+
+const CLINE_PIN_MODES = new Set(['strict', 'preferred'])
+const CLINE_PIN_SORTS = new Set(['cost', 'ttft', 'tps', 'none'])
+
+function normalizeClinePinProviders(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    throw new Error(ERROR_MESSAGES.INVALID_CLINE_UPSTREAM_PINS)
+  }
+  return value
+    .map((item) => {
+      if (typeof item !== 'string') {
+        throw new Error(ERROR_MESSAGES.INVALID_CLINE_UPSTREAM_PINS)
+      }
+      return item.trim()
+    })
+    .filter(Boolean)
+}
+
+/**
+ * Parse the `cline_upstream_pins` JSON text edited in the channel form into the
+ * normalized structure written back to the channel `setting` JSON.
+ *
+ * Blank input means "no pins" and yields null. Malformed JSON, a non-object payload, a
+ * non-object pin, or an unknown `pin_mode`/`sort` throws. Empty pin fields are dropped so
+ * the stored JSON stays clean.
+ */
+export function parseClineUpstreamPins(
+  text: string | undefined
+): Record<string, ClineUpstreamPin> | null {
+  if (!text?.trim()) return null
+
+  const parsed: unknown = JSON.parse(text)
+  if (!isJsonObjectValue(parsed)) {
+    throw new Error(ERROR_MESSAGES.INVALID_CLINE_UPSTREAM_PINS)
+  }
+
+  const pins: Record<string, ClineUpstreamPin> = {}
+  for (const [rawModel, rawPin] of Object.entries(parsed)) {
+    const model = rawModel.trim()
+    if (!model || !isJsonObjectValue(rawPin)) {
+      throw new Error(ERROR_MESSAGES.INVALID_CLINE_UPSTREAM_PINS)
+    }
+
+    const pin: ClineUpstreamPin = {}
+
+    if ('upstreams' in rawPin) {
+      const upstreams = normalizeClinePinProviders(rawPin.upstreams)
+      if (upstreams.length > 0) pin.upstreams = upstreams
+    }
+    if ('exclude' in rawPin) {
+      const exclude = normalizeClinePinProviders(rawPin.exclude)
+      if (exclude.length > 0) pin.exclude = exclude
+    }
+    if ('pin_mode' in rawPin) {
+      const pinMode = String(rawPin.pin_mode ?? '').trim()
+      if (pinMode && !CLINE_PIN_MODES.has(pinMode)) {
+        throw new Error(ERROR_MESSAGES.INVALID_CLINE_UPSTREAM_PINS)
+      }
+      if (pinMode) pin.pin_mode = pinMode as ClineUpstreamPin['pin_mode']
+    }
+    if ('sort' in rawPin) {
+      const sort = String(rawPin.sort ?? '').trim()
+      if (sort && !CLINE_PIN_SORTS.has(sort)) {
+        throw new Error(ERROR_MESSAGES.INVALID_CLINE_UPSTREAM_PINS)
+      }
+      if (sort) pin.sort = sort as ClineUpstreamPin['sort']
+    }
+
+    pins[model] = pin
+  }
+
+  return pins
 }
 
 /**
@@ -622,6 +733,21 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
     settingObj.http_protocol = HTTP_PROTOCOL_HTTP1
   } else if (shards > 1) {
     settingObj.http2_connection_shards = shards
+  }
+
+  // Cline (type 61): only write the pins key when pins are configured, so clearing
+  // the field removes the key from the stored setting JSON.
+  if (formData.cline_upstream_pins?.trim()) {
+    try {
+      const clineUpstreamPins = parseClineUpstreamPins(
+        formData.cline_upstream_pins
+      )
+      if (clineUpstreamPins && Object.keys(clineUpstreamPins).length > 0) {
+        settingObj.cline_upstream_pins = clineUpstreamPins
+      }
+    } catch {
+      // Malformed JSON is already reported by the form schema; saving must not throw.
+    }
   }
 
   return JSON.stringify(settingObj)
@@ -770,7 +896,8 @@ function normalizeBaseUrl(value: string | undefined): string {
  */
 export function transformFormDataToCreatePayload(formData: ChannelFormValues): {
   mode: 'single' | 'batch' | 'multi_to_single'
-  multi_key_mode?: 'random' | 'polling'
+  multi_key_mode?: MultiKeyStrategy
+  multi_key_retry_times?: number
   batch_add_set_key_prefix_2_name?: boolean
   channel: Partial<Channel>
 } {
@@ -811,6 +938,8 @@ export function transformFormDataToCreatePayload(formData: ChannelFormValues): {
     mode,
     multi_key_mode:
       mode === 'multi_to_single' ? formData.multi_key_type : undefined,
+    multi_key_retry_times:
+      mode === 'multi_to_single' ? formData.multi_key_retry_times : undefined,
     batch_add_set_key_prefix_2_name:
       mode === 'batch' ? formData.batch_add_set_key_prefix_2_name : undefined,
     channel,

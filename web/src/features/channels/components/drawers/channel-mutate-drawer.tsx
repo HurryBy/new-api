@@ -139,12 +139,16 @@ import {
 import {
   ADD_MODE_OPTIONS,
   CHANNEL_STATUS_LABELS,
+  CHANNEL_TYPE_CLINE,
   CHANNEL_TYPE_OPTIONS,
   CHANNEL_TYPE_WARNINGS,
+  DEFAULT_MULTI_KEY_RETRY_TIMES,
   ERROR_MESSAGES,
   FIELD_DESCRIPTIONS,
   FIELD_PLACEHOLDERS,
+  MAX_MULTI_KEY_RETRY_TIMES,
   MODEL_FETCHABLE_TYPES,
+  MULTI_KEY_MODES,
 } from '../../constants'
 import { useChannelMutateForm } from '../../hooks/use-channel-mutate-form'
 import {
@@ -289,6 +293,7 @@ const SENSITIVE_FORM_FIELDS = [
   'pass_through_body_enabled',
   'system_prompt',
   'system_prompt_override',
+  'cline_upstream_pins',
   'allow_service_tier',
   'disable_store',
   'allow_safety_identifier',
@@ -337,6 +342,7 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
     values.weight ||
     values.proxy?.trim() ||
     values.system_prompt?.trim() ||
+    values.cline_upstream_pins?.trim() ||
     values.force_format ||
     values.thinking_to_content ||
     values.pass_through_body_enabled ||
@@ -754,6 +760,7 @@ export function ChannelMutateDrawer({
   const currentHttp2ConnectionShards = form.watch('http2_connection_shards')
   const currentSystemPrompt = form.watch('system_prompt')
   const currentSystemPromptOverride = form.watch('system_prompt_override')
+  const currentClineUpstreamPins = form.watch('cline_upstream_pins')
   const currentAllowServiceTier = form.watch('allow_service_tier')
   const currentDisableStore = form.watch('disable_store')
   const currentAllowSafetyIdentifier = form.watch('allow_safety_identifier')
@@ -861,6 +868,17 @@ export function ChannelMutateDrawer({
         ? ADD_MODE_OPTIONS
         : ADD_MODE_OPTIONS.filter((option) => option.value === 'single'),
     [supportsMultiKeyAddMode]
+  )
+  const multiKeyStrategy =
+    MULTI_KEY_MODES.find((option) => option.value === multiKeyType) ??
+    MULTI_KEY_MODES[0]
+  const multiKeyStrategyOptions = useMemo(
+    () =>
+      MULTI_KEY_MODES.map((option) => ({
+        value: option.value,
+        label: t(option.label),
+      })),
+    [t]
   )
 
   const advancedCustomStats = useMemo(
@@ -1021,6 +1039,7 @@ export function ChannelMutateDrawer({
     currentDisableTaskPollingSleep ||
     currentProxy?.trim() ||
     currentSystemPrompt?.trim() ||
+    currentClineUpstreamPins?.trim() ||
     currentSystemPromptOverride ||
     (currentHttpProtocol && currentHttpProtocol !== 'auto') ||
     (currentHttp2ConnectionShards != null && currentHttp2ConnectionShards > 1)
@@ -3177,59 +3196,95 @@ export function ChannelMutateDrawer({
                                 />
                               )}
 
-                              {!isEditing &&
-                                multiKeyMode === 'multi_to_single' && (
+                              {(isEditing
+                                ? isMultiKeyChannel
+                                : multiKeyMode === 'multi_to_single') && (
+                                <FormField
+                                  control={form.control}
+                                  name='multi_key_type'
+                                  render={({ field }) => (
+                                    <FormItem>
+                                      <FormLabel>
+                                        {t('Multi-Key Strategy')}
+                                      </FormLabel>
+                                      <Select
+                                        items={multiKeyStrategyOptions}
+                                        onValueChange={field.onChange}
+                                        value={field.value}
+                                      >
+                                        <FormControl>
+                                          <SelectTrigger>
+                                            <SelectValue />
+                                          </SelectTrigger>
+                                        </FormControl>
+                                        <SelectContent
+                                          alignItemWithTrigger={false}
+                                        >
+                                          <SelectGroup>
+                                            {multiKeyStrategyOptions.map(
+                                              (option) => (
+                                                <SelectItem
+                                                  key={option.value}
+                                                  value={option.value}
+                                                >
+                                                  {option.label}
+                                                </SelectItem>
+                                              )
+                                            )}
+                                          </SelectGroup>
+                                        </SelectContent>
+                                      </Select>
+                                      <FormDescription>
+                                        <span
+                                          className={cn(
+                                            multiKeyStrategy.warning &&
+                                              'text-warning'
+                                          )}
+                                        >
+                                          {t(multiKeyStrategy.description)}
+                                        </span>
+                                      </FormDescription>
+                                      <FormMessage />
+                                    </FormItem>
+                                  )}
+                                />
+                              )}
+
+                              {(isEditing
+                                ? isMultiKeyChannel
+                                : multiKeyMode === 'multi_to_single') &&
+                                multiKeyType === 'sticky' && (
                                   <FormField
                                     control={form.control}
-                                    name='multi_key_type'
+                                    name='multi_key_retry_times'
                                     render={({ field }) => (
                                       <FormItem>
                                         <FormLabel>
-                                          {t('Multi-Key Strategy')}
+                                          {t('Key Switch Retry Times')}
                                         </FormLabel>
-                                        <Select
-                                          items={[
-                                            {
-                                              value: 'random',
-                                              label: t('Random'),
-                                            },
-                                            {
-                                              value: 'polling',
-                                              label: t('Polling'),
-                                            },
-                                          ]}
-                                          onValueChange={field.onChange}
-                                          value={field.value}
-                                        >
-                                          <FormControl>
-                                            <SelectTrigger>
-                                              <SelectValue />
-                                            </SelectTrigger>
-                                          </FormControl>
-                                          <SelectContent
-                                            alignItemWithTrigger={false}
-                                          >
-                                            <SelectGroup>
-                                              <SelectItem value='random'>
-                                                {t('Random')}
-                                              </SelectItem>
-                                              <SelectItem value='polling'>
-                                                {t('Polling')}
-                                              </SelectItem>
-                                            </SelectGroup>
-                                          </SelectContent>
-                                        </Select>
+                                        <FormControl>
+                                          <Input
+                                            type='number'
+                                            min={1}
+                                            max={MAX_MULTI_KEY_RETRY_TIMES}
+                                            placeholder={String(
+                                              DEFAULT_MULTI_KEY_RETRY_TIMES
+                                            )}
+                                            {...field}
+                                            value={
+                                              field.value ??
+                                              DEFAULT_MULTI_KEY_RETRY_TIMES
+                                            }
+                                            onChange={(e) =>
+                                              field.onChange(
+                                                Number(e.target.value)
+                                              )
+                                            }
+                                          />
+                                        </FormControl>
                                         <FormDescription>
-                                          {multiKeyType === 'polling' ? (
-                                            <span className='text-warning'>
-                                              {t(
-                                                'Polling mode requires Redis and memory cache, otherwise performance will be significantly degraded'
-                                              )}
-                                            </span>
-                                          ) : (
-                                            t(
-                                              'Randomly select a key from the pool for each request'
-                                            )
+                                          {t(
+                                            'Consecutive failures allowed on the current key before the channel permanently switches to the next one'
                                           )}
                                         </FormDescription>
                                         <FormMessage />
@@ -4366,6 +4421,35 @@ export function ChannelMutateDrawer({
                                 </FormItem>
                               )}
                             />
+
+                            {currentType === CHANNEL_TYPE_CLINE && (
+                              <FormField
+                                control={form.control}
+                                name='cline_upstream_pins'
+                                render={({ field }) => (
+                                  <FormItem>
+                                    <FormLabel>
+                                      {t('Cline Upstream Pins (per model)')}
+                                    </FormLabel>
+                                    <FormControl>
+                                      <Textarea
+                                        placeholder={t(
+                                          '{"cline-pass/glm-5.2": {"upstreams": ["alibaba"], "pin_mode": "preferred", "sort": "cost"}}'
+                                        )}
+                                        rows={6}
+                                        {...field}
+                                      />
+                                    </FormControl>
+                                    <FormDescription>
+                                      {t(
+                                        'Pin Cline upstream providers per model. Keys are model names such as cline-pass/glm-5.2; pin_mode is strict or preferred; sort is cost, ttft, tps, or none.'
+                                      )}
+                                    </FormDescription>
+                                    <FormMessage />
+                                  </FormItem>
+                                )}
+                              />
+                            )}
                           </fieldset>
                         </div>
 

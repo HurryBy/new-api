@@ -573,8 +573,21 @@ func RefreshCodexChannelCredential(c *gin.Context) {
 type AddChannelRequest struct {
 	Mode                      string                `json:"mode"`
 	MultiKeyMode              constant.MultiKeyMode `json:"multi_key_mode"`
+	MultiKeyRetryTimes        int                   `json:"multi_key_retry_times"`
 	BatchAddSetKeyPrefix2Name bool                  `json:"batch_add_set_key_prefix_2_name"`
 	Channel                   *model.Channel        `json:"channel"`
+}
+
+// normalizeMultiKeyRetryTimes keeps the per-channel sticky retry budget inside a sane
+// range; 0 means "use the default".
+func normalizeMultiKeyRetryTimes(retryTimes int) int {
+	if retryTimes < 0 {
+		return 0
+	}
+	if retryTimes > model.MaxMultiKeyRetryTimes {
+		return model.MaxMultiKeyRetryTimes
+	}
+	return retryTimes
 }
 
 func getVertexArrayKeys(keys string) ([]string, error) {
@@ -632,6 +645,7 @@ func AddChannel(c *gin.Context) {
 	case "multi_to_single":
 		addChannelRequest.Channel.ChannelInfo.IsMultiKey = true
 		addChannelRequest.Channel.ChannelInfo.MultiKeyMode = addChannelRequest.MultiKeyMode
+		addChannelRequest.Channel.ChannelInfo.MultiKeyRetryTimes = normalizeMultiKeyRetryTimes(addChannelRequest.MultiKeyRetryTimes)
 		if addChannelRequest.Channel.Type == constant.ChannelTypeVertexAi && addChannelRequest.Channel.GetOtherSettings().VertexKeyType != dto.VertexKeyTypeAPIKey {
 			array, err := getVertexArrayKeys(addChannelRequest.Channel.Key)
 			if err != nil {
@@ -929,8 +943,9 @@ func DeleteChannelBatch(c *gin.Context) {
 
 type PatchChannel struct {
 	model.Channel
-	MultiKeyMode *string `json:"multi_key_mode"`
-	KeyMode      *string `json:"key_mode"` // 多key模式下密钥覆盖或者追加
+	MultiKeyMode       *string `json:"multi_key_mode"`
+	MultiKeyRetryTimes *int    `json:"multi_key_retry_times"`
+	KeyMode            *string `json:"key_mode"` // 多key模式下密钥覆盖或者追加
 }
 
 type ChannelStatusRequest struct {
@@ -1001,6 +1016,9 @@ func UpdateChannel(c *gin.Context) {
 	// If the request explicitly specifies a new MultiKeyMode, apply it on top of the original info.
 	if channel.MultiKeyMode != nil && *channel.MultiKeyMode != "" {
 		channel.ChannelInfo.MultiKeyMode = constant.MultiKeyMode(*channel.MultiKeyMode)
+	}
+	if channel.MultiKeyRetryTimes != nil {
+		channel.ChannelInfo.MultiKeyRetryTimes = normalizeMultiKeyRetryTimes(*channel.MultiKeyRetryTimes)
 	}
 
 	// 处理多key模式下的密钥追加/覆盖逻辑
@@ -1721,6 +1739,8 @@ func ManageMultiKeys(c *gin.Context) {
 		if channel.ChannelInfo.MultiKeyDisabledReason != nil {
 			delete(channel.ChannelInfo.MultiKeyDisabledReason, keyIndex)
 		}
+		// 重新启用的密钥从零开始累计失败次数
+		delete(channel.ChannelInfo.MultiKeyFailureCount, keyIndex)
 
 		err = channel.Update()
 		if err != nil {
@@ -1745,6 +1765,7 @@ func ManageMultiKeys(c *gin.Context) {
 		channel.ChannelInfo.MultiKeyStatusList = make(map[int]int)
 		channel.ChannelInfo.MultiKeyDisabledTime = make(map[int]int64)
 		channel.ChannelInfo.MultiKeyDisabledReason = make(map[int]string)
+		channel.ChannelInfo.MultiKeyFailureCount = make(map[int]int)
 
 		err = channel.Update()
 		if err != nil {
@@ -1829,6 +1850,7 @@ func ManageMultiKeys(c *gin.Context) {
 		var newStatusList = make(map[int]int)
 		var newDisabledTime = make(map[int]int64)
 		var newDisabledReason = make(map[int]string)
+		var newFailureCount = make(map[int]int)
 
 		newIndex := 0
 		for i, key := range keys {
@@ -1855,6 +1877,9 @@ func ManageMultiKeys(c *gin.Context) {
 					newDisabledReason[newIndex] = r
 				}
 			}
+			if count, exists := channel.ChannelInfo.MultiKeyFailureCount[i]; exists {
+				newFailureCount[newIndex] = count
+			}
 			newIndex++
 		}
 
@@ -1872,6 +1897,7 @@ func ManageMultiKeys(c *gin.Context) {
 		channel.ChannelInfo.MultiKeyStatusList = newStatusList
 		channel.ChannelInfo.MultiKeyDisabledTime = newDisabledTime
 		channel.ChannelInfo.MultiKeyDisabledReason = newDisabledReason
+		channel.ChannelInfo.MultiKeyFailureCount = newFailureCount
 
 		err = channel.Update()
 		if err != nil {
@@ -1893,6 +1919,7 @@ func ManageMultiKeys(c *gin.Context) {
 		var newStatusList = make(map[int]int)
 		var newDisabledTime = make(map[int]int64)
 		var newDisabledReason = make(map[int]string)
+		var newFailureCount = make(map[int]int)
 
 		newIndex := 0
 		for i, key := range keys {
@@ -1908,6 +1935,9 @@ func ManageMultiKeys(c *gin.Context) {
 				deletedCount++
 			} else {
 				remainingKeys = append(remainingKeys, key)
+				if count, exists := channel.ChannelInfo.MultiKeyFailureCount[i]; exists {
+					newFailureCount[newIndex] = count
+				}
 				// 保留非自动禁用密钥的状态信息，重新索引
 				if status != 1 {
 					newStatusList[newIndex] = status
@@ -1940,6 +1970,7 @@ func ManageMultiKeys(c *gin.Context) {
 		channel.ChannelInfo.MultiKeyStatusList = newStatusList
 		channel.ChannelInfo.MultiKeyDisabledTime = newDisabledTime
 		channel.ChannelInfo.MultiKeyDisabledReason = newDisabledReason
+		channel.ChannelInfo.MultiKeyFailureCount = newFailureCount
 
 		err = channel.Update()
 		if err != nil {

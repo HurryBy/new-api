@@ -29,10 +29,17 @@ export const channelInfoSchema = z.object({
   multi_key_disabled_reason: z.record(z.string(), z.string()).optional(),
   multi_key_disabled_time: z.record(z.string(), z.number()).optional(),
   multi_key_polling_index: z.number().default(0),
-  multi_key_mode: z.enum(['random', 'polling']).default('random'),
+  multi_key_mode: z.enum(['random', 'polling', 'sticky']).default('random'),
+  // Consecutive failures a sticky key may accumulate before the channel switches to
+  // the next key; 0 means the backend default.
+  multi_key_retry_times: z.number().default(0),
+  multi_key_failure_count: z.record(z.string(), z.number()).optional(),
 })
 
 export type ChannelInfo = z.infer<typeof channelInfoSchema>
+
+/** Multi-key selection strategy, mirrors constant.MultiKeyMode in the backend. */
+export type MultiKeyStrategy = ChannelInfo['multi_key_mode']
 
 export const channelSchema = z.object({
   id: z.number(),
@@ -69,6 +76,7 @@ export const channelSchema = z.object({
     multi_key_size: 0,
     multi_key_polling_index: 0,
     multi_key_mode: 'random',
+    multi_key_retry_times: 0,
   }),
   settings: z.string().default('{}'), // other_settings JSON
 })
@@ -88,6 +96,21 @@ export interface ChannelSettings {
   system_prompt_override?: boolean
   http_protocol?: 'auto' | 'http1' | string
   http2_connection_shards?: number
+  /** Per-model Cline Pass upstream pins (stored under `cline_upstream_pins`). */
+  cline_upstream_pins?: Record<string, ClineUpstreamPin>
+}
+
+/**
+ * Upstream pin of one model on a Cline (type 61) channel: `upstreams` is ordered by
+ * priority, `pin_mode` decides whether the gateway fails over to the next candidate,
+ * and `sort` reorders candidates before sending. Mirrors the backend
+ * `cline_upstream_pins` setting.
+ */
+export interface ClineUpstreamPin {
+  upstreams?: string[]
+  exclude?: string[]
+  pin_mode?: 'strict' | 'preferred'
+  sort?: 'cost' | 'ttft' | 'tps' | 'none'
 }
 
 export interface ChannelOtherSettings {
@@ -363,7 +386,7 @@ export interface ChannelFormData {
   other?: string
   // Multi-key specific
   multi_key_mode?: 'single' | 'batch' | 'multi_to_single'
-  multi_key_type?: 'random' | 'polling'
+  multi_key_type?: MultiKeyStrategy
   batch_add_set_key_prefix_2_name?: boolean
 }
 
@@ -373,7 +396,22 @@ export interface ChannelFormData {
 
 export interface AddChannelRequest {
   mode: 'single' | 'batch' | 'multi_to_single'
-  multi_key_mode?: 'random' | 'polling'
+  multi_key_mode?: MultiKeyStrategy
+  multi_key_retry_times?: number
   batch_add_set_key_prefix_2_name?: boolean
   channel: Partial<Channel>
+}
+
+// ============================================================================
+// Update Channel Request
+// ============================================================================
+
+/**
+ * PUT /api/channel accepts two request-only fields next to the channel columns:
+ * how incoming keys are merged, and the multi-key selection strategy.
+ */
+export type ChannelUpdateRequest = Partial<Channel> & {
+  key_mode?: 'append' | 'replace'
+  multi_key_mode?: MultiKeyStrategy
+  multi_key_retry_times?: number
 }

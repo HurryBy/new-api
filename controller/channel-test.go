@@ -689,6 +689,63 @@ func detectErrorMessageFromJSONBytes(jsonBytes []byte) string {
 	return message
 }
 
+// clinePassModelPrefixes 是 Cline Pass 订阅模型的 id 前缀。
+var clinePassModelPrefixes = []string{"cline-pass/", "cline-cloud/", "cline-free/"}
+
+const (
+	// defaultTestTokenBudget 是普通模型的测试 token 预算。
+	defaultTestTokenBudget = 16
+	// reasoningTestTokenBudget 给推理模型用的预算。
+	//
+	// Cline Pass 的 cline-pass/* 与 cline-cloud/* 都是推理模型：默认的 16 tokens
+	// 会被推理过程吃光，api.cline.bot 直接返回
+	// HTTP 500 {"error":"empty response content","success":false}，
+	// 于是「测试」必然失败，而渠道本身是好的 —— dsh-cline-pass 的
+	// classifyUpstreamError 同样把 empty response content 判定为渠道正常。
+	// 给足预算，模型才会产出可见内容。
+	reasoningTestTokenBudget = 512
+)
+
+// testUpstreamModelName 按渠道的 model_mapping 解析出真正发给上游的模型名，
+// 这样用客户端模型名测试（例如 deepseek-v4.1-flash → cline-pass/deepseek-v4.1-flash）
+// 也能识别出上游其实是 Cline Pass。
+func testUpstreamModelName(channel *model.Channel, model string) string {
+	if channel == nil {
+		return model
+	}
+	raw := strings.TrimSpace(channel.GetModelMapping())
+	if raw == "" || raw == "{}" {
+		return model
+	}
+	mapping := make(map[string]string)
+	if err := common.Unmarshal([]byte(raw), &mapping); err != nil {
+		return model
+	}
+	current := model
+	for i := 0; i <= len(mapping); i++ {
+		next, ok := mapping[current]
+		if !ok || next == "" || next == current {
+			break
+		}
+		current = next
+	}
+	return current
+}
+
+// testTokenBudget 返回该渠道 + 模型测试时应使用的 token 预算。
+func testTokenBudget(channel *model.Channel, model string) uint {
+	if channel != nil && channel.Type == constant.ChannelTypeCline {
+		return reasoningTestTokenBudget
+	}
+	lowered := strings.ToLower(strings.TrimSpace(testUpstreamModelName(channel, model)))
+	for _, prefix := range clinePassModelPrefixes {
+		if strings.HasPrefix(lowered, prefix) {
+			return reasoningTestTokenBudget
+		}
+	}
+	return defaultTestTokenBudget
+}
+
 func buildTestRequest(model string, endpointType string, channel *model.Channel, isStream bool) dto.Request {
 	testResponsesInput := json.RawMessage(`[{"role":"user","content":"hi"}]`)
 
@@ -734,7 +791,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 			return &dto.ClaudeRequest{
 				Model:     model,
 				Stream:    lo.ToPtr(isStream),
-				MaxTokens: lo.ToPtr(uint(16)),
+				MaxTokens: lo.ToPtr(testTokenBudget(channel, model)),
 				Messages: []dto.ClaudeMessage{
 					{
 						Role:    "user",
@@ -764,7 +821,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 						Content: "hi",
 					},
 				},
-				MaxTokens: lo.ToPtr(uint(16)),
+				MaxTokens: lo.ToPtr(testTokenBudget(channel, model)),
 			}
 			if isStream {
 				req.StreamOptions = &dto.StreamOptions{IncludeUsage: true}
@@ -827,7 +884,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 	} else if strings.Contains(model, "gemini") {
 		testRequest.MaxTokens = lo.ToPtr(uint(3000))
 	} else {
-		testRequest.MaxTokens = lo.ToPtr(uint(16))
+		testRequest.MaxTokens = lo.ToPtr(testTokenBudget(channel, model))
 	}
 
 	return testRequest

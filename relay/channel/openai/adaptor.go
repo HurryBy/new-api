@@ -170,6 +170,28 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 		url := info.ChannelBaseUrl
 		url = strings.Replace(url, "{model}", info.UpstreamModelName, -1)
 		return url, nil
+	case constant.ChannelTypeCline:
+		// Cline Pass 官方文档给的 base 形如 https://api.cline.bot/api/v1，
+		// 而 new-api 的请求路径本身自带 /v1，两者叠加会拼出 /v1/v1/chat/completions。
+		// 这里在 base 已经带版本段时把路径里的 /v1 去掉，
+		// 于是 .../api 与 .../api/v1 两种填法都能得到同一个正确 URL。
+		base := strings.TrimSuffix(info.ChannelBaseUrl, "/")
+		requestPath := info.RequestURLPath
+		// api.cline.bot 只暴露 /v1/chat/completions 与 /v1/models：
+		// Claude / Gemini 格式的请求体已经在适配器里转成 chat completions，
+		// 路径也必须跟着落到 chat completions，否则会打到不存在的
+		// /v1/messages 之类的路径并返回 404 Not Found。
+		// （Responses 格式不在这里处理：那种请求在进适配器之前就已由
+		// relay/responses_via_chat_completions.go 降级为 chat completions。）
+		if (info.RelayFormat == types.RelayFormatClaude || info.RelayFormat == types.RelayFormatGemini) &&
+			info.RelayMode != relayconstant.RelayModeResponses &&
+			info.RelayMode != relayconstant.RelayModeResponsesCompact {
+			requestPath = "/v1/chat/completions"
+		}
+		if strings.HasSuffix(base, "/v1") && strings.HasPrefix(requestPath, "/v1/") {
+			requestPath = strings.TrimPrefix(requestPath, "/v1")
+		}
+		return relaycommon.GetFullRequestURL(base, requestPath, info.ChannelType), nil
 	default:
 		if (info.RelayFormat == types.RelayFormatClaude || info.RelayFormat == types.RelayFormatGemini) &&
 			info.RelayMode != relayconstant.RelayModeResponses &&
@@ -628,6 +650,8 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 	} else if info.RelayMode == relayconstant.RelayModeRealtime {
 		return channel.DoWssRequest(a, c, info, requestBody)
 	} else {
+		// Cline Pass 渠道：按模型注入「钉上游渠道」（非 Cline 渠道是零开销直通）
+		requestBody = relaycommon.ApplyClineUpstreamPinReader(requestBody, info)
 		return channel.DoApiRequest(a, c, info, requestBody)
 	}
 }
@@ -659,6 +683,15 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 	case relayconstant.RelayModeResponsesCompact:
 		usage, err = OaiResponsesCompactionHandler(c, resp)
 	default:
+		// Cline 网关可能给非流式回答套一层 {"data": {...}} 信封，
+		// 交给通用 handler 之前先剥掉，否则解析不到 choices。
+		// （流式分片没有信封，见 dsh-cline-pass 的 unwrapEnvelope 注释。）
+		if info.ChannelType == constant.ChannelTypeCline && !info.IsStream {
+			if unwrapErr := UnwrapClineEnvelopeResponse(resp); unwrapErr != nil {
+				err = types.NewOpenAIError(unwrapErr, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
+				return
+			}
+		}
 		if info.IsStream {
 			usage, err = OaiStreamHandler(c, info, resp)
 		} else {

@@ -58,7 +58,10 @@ const (
 	ChannelTypeAdvancedCustom = 58
 	ChannelTypeSub2API        = 59
 	ChannelTypeNewAPI         = 60
-	ChannelTypeDummy          // this one is only for count, do not add any channel after this
+	ChannelTypeCline          = 61
+	// 注意：下面这个常量必须显式赋值 —— 常量块里不带表达式的行只会复用上一行的值，
+	// 若留空就会和 ChannelTypeCline 撞成同一个数（这里表示「类型总数」= 最后一个类型 + 1）。
+	ChannelTypeDummy = 62 // this one is only for count, do not add any channel after this
 
 )
 
@@ -124,6 +127,10 @@ var ChannelBaseURLs = []string{
 	"",                                          //58
 	"",                                          //59
 	"",                                          //60
+	// Cline Pass 网关。注意这里**不含**版本段：new-api 的请求路径自带 /v1
+	// （见 GetFullRequestURL 的 base+path 拼接约定，OpenRouter 同理），
+	// 所以存 .../api 拼出来才是官方文档里的 https://api.cline.bot/api/v1/chat/completions。
+	"https://api.cline.bot/api", //61
 }
 
 var ChannelTypeNames = map[int]string{
@@ -184,6 +191,7 @@ var ChannelTypeNames = map[int]string{
 	ChannelTypeAdvancedCustom: "Advanced Custom",
 	ChannelTypeSub2API:        "Sub2API",
 	ChannelTypeNewAPI:         "New API",
+	ChannelTypeCline:          "Cline",
 }
 
 func GetChannelTypeName(channelType int) string {

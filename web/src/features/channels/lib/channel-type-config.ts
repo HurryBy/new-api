@@ -164,6 +164,18 @@ export const CHANNEL_TYPE_CONFIGS: Record<number, ChannelTypeConfig> = {
       models: 'Models',
     },
   },
+  61: {
+    id: 61,
+    name: CHANNEL_TYPES[61],
+    icon: 'OpenAI',
+    defaultBaseUrl: 'https://api.cline.bot/api',
+    hints: {
+      baseUrl:
+        '留空则使用 Cline Pass 默认网关 https://api.cline.bot/api，如需手填请填 https://api.cline.bot/api',
+      key: 'Cline Pass API Key（sk_ 开头）',
+      models: '例如 cline-pass/glm-5.2',
+    },
+  },
 }
 
 /**

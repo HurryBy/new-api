@@ -76,6 +76,27 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		return types.NewError(fmt.Errorf("invalid api type: %d", info.ApiType), types.ErrorCodeInvalidApiType, types.ErrOptionWithSkipRetry())
 	}
 	adaptor.Init(info)
+
+	// 上游只提供 chat completions 的渠道（Cline Pass / 只实现 chat completions 的中转网关）
+	// 无法服务 /v1/responses：原样透传会打到不存在的路径并返回 404。
+	// 这里把它降级成 chat completions 下发，再由 responses_via_chat_completions.go
+	// 把响应转回 Responses 格式。
+	if info.RelayMode != relayconstant.RelayModeResponsesCompact &&
+		!model_setting.GetGlobalSettings().PassThroughRequestEnabled &&
+		!info.ChannelSetting.PassThroughBodyEnabled &&
+		service.ShouldResponsesUseChatCompletionsGlobal(info.ChannelId, info.ChannelType, info.OriginModelName) {
+		usage, newApiErr := responsesViaChatCompletions(c, info, adaptor, request)
+		if newApiErr != nil {
+			return newApiErr
+		}
+		if strings.HasPrefix(info.OriginModelName, "gpt-4o-audio") {
+			service.PostAudioConsumeQuota(c, info, usage, "")
+		} else {
+			service.PostTextConsumeQuota(c, info, usage, nil)
+		}
+		return nil
+	}
+
 	var requestBody io.Reader
 	if model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled {
 		storage, err := common.GetBodyStorage(c)

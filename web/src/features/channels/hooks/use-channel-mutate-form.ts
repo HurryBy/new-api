@@ -104,21 +104,29 @@ export function useChannelMutateForm(props: UseChannelMutateFormParams) {
             delete payload[field]
           }
         }
-        const payloadWithKeyMode =
-          canEditSensitive &&
-          props.isMultiKeyChannel &&
-          data.key?.trim() &&
-          data.key_mode
-            ? {
-                ...payload,
-                key_mode: data.key_mode,
-              }
-            : payload
+        // key_mode / multi_key_mode are request-only fields of the update
+        // endpoint, not channel columns, so they ride alongside the payload.
+        const multiKeyFields: {
+          key_mode?: ChannelFormValues['key_mode']
+          multi_key_mode?: ChannelFormValues['multi_key_type']
+          multi_key_retry_times?: ChannelFormValues['multi_key_retry_times']
+        } = {}
+        if (canEditSensitive && props.isMultiKeyChannel) {
+          if (data.key?.trim() && data.key_mode) {
+            multiKeyFields.key_mode = data.key_mode
+          }
+          if (data.multi_key_type) {
+            multiKeyFields.multi_key_mode = data.multi_key_type
+          }
+          if (data.multi_key_retry_times) {
+            multiKeyFields.multi_key_retry_times = data.multi_key_retry_times
+          }
+        }
 
-        const response = await updateChannel(
-          props.currentRow.id,
-          payloadWithKeyMode
-        )
+        const response = await updateChannel(props.currentRow.id, {
+          ...payload,
+          ...multiKeyFields,
+        })
         if (!response.success) {
           throw new Error(response.message || t(ERROR_MESSAGES.UPDATE_FAILED))
         }

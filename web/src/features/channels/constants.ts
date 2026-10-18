@@ -16,12 +16,15 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import type { MultiKeyStrategy } from './types'
+
 // ============================================================================
 // Channel Types (from constant/channel.go)
 // All label/name values are i18n keys; use t(value) when displaying.
 // ============================================================================
 
 export const CHANNEL_TYPE_NEW_API = 60
+export const CHANNEL_TYPE_CLINE = 61
 
 export const CHANNEL_TYPES = {
   0: 'Unknown',
@@ -81,6 +84,7 @@ export const CHANNEL_TYPES = {
   58: 'Advanced Custom',
   59: 'Sub2API',
   60: 'New API',
+  61: 'Cline',
 } as const
 
 const CHANNEL_TYPE_DISPLAY_ORDER: number[] = [
@@ -186,10 +190,39 @@ export const MULTI_KEY_STATUS_CONFIG = {
 // Multi-Key Modes
 // ============================================================================
 
-export const MULTI_KEY_MODES = [
-  { value: 'random', label: 'Random' },
-  { value: 'polling', label: 'Polling' },
-] as const
+// All label/description values are i18n keys; use t(value) when displaying.
+export const MULTI_KEY_MODES: readonly {
+  value: MultiKeyStrategy
+  label: string
+  description: string
+  /** Render the description as a warning instead of plain help text. */
+  warning?: true
+}[] = [
+  {
+    value: 'random',
+    label: 'Random',
+    description: 'Randomly select a key from the pool for each request',
+  },
+  {
+    value: 'polling',
+    label: 'Polling',
+    description:
+      'Polling mode requires Redis and memory cache, otherwise performance will be significantly degraded',
+    warning: true,
+  },
+  {
+    value: 'sticky',
+    label: 'Sticky',
+    description:
+      'Always use the first available key; only switch when that key becomes unavailable',
+  },
+]
+
+// Mirrors model.DefaultMultiKeyRetryTimes / model.MaxMultiKeyRetryTimes: how many
+// consecutive failures a sticky key may accumulate before the channel switches to the
+// next key for every user.
+export const DEFAULT_MULTI_KEY_RETRY_TIMES = 3
+export const MAX_MULTI_KEY_RETRY_TIMES = 100
 
 export const ADD_MODE_OPTIONS = [
   { value: 'single', label: 'Single Key' },
@@ -243,6 +276,8 @@ export const ERROR_MESSAGES = {
   REQUIRED_GROUP: 'Group is required',
   INVALID_JSON: 'Invalid JSON format',
   INVALID_MODEL_MAPPING: 'Invalid model mapping format',
+  INVALID_CLINE_UPSTREAM_PINS:
+    'Cline upstream pins must be a JSON object mapping model names to { upstreams, exclude, pin_mode, sort }',
   INVALID_PROXY:
     'Proxy address must use HTTP, HTTPS, SOCKS5, or SOCKS5H and include a valid host',
   INVALID_HTTP_PROTOCOL: 'HTTP protocol must be Auto or HTTP/1.1',
@@ -390,6 +425,9 @@ export const FIELD_DESCRIPTIONS = {
 export const MODEL_FETCHABLE_TYPES = new Set([
   1, 4, 14, 17, 20, 23, 24, 25, 26, 27, 31, 34, 35, 40, 42, 43, 47, 48, 57, 58,
   59, 60,
+  // Cline Pass：目录在 {baseURL}/models，而 new-api 的探测路径是 {baseURL}/v1/models，
+  // 默认 base 存的是 https://api.cline.bot/api，拼出来正好是官方的 /api/v1/models
+  61,
 ])
 
 export const TYPE_TO_KEY_PROMPT: Record<number, string> = {

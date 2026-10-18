@@ -23,6 +23,24 @@ type ChannelSettings struct {
 	// HTTP2ConnectionShards spreads HTTP/2 traffic across N independent transports
 	// (1-8). Zero/unset means 1. Ignored when HTTPProtocol is "http1".
 	HTTP2ConnectionShards int `json:"http2_connection_shards,omitempty"`
+	// ClineUpstreamPins 钉住 Cline Pass 渠道各模型的上游供应商（按模型配置）。
+	// key 为上游模型名，例如 {"cline-pass/glm-5.2": {...}}。
+	// 语义移植自 dsh-cline-pass 的 pin：出站请求体注入 provider.only/order/sort
+	// 与 providerOptions.gateway.*。
+	ClineUpstreamPins map[string]ClineUpstreamPin `json:"cline_upstream_pins,omitempty"`
+}
+
+// ClineUpstreamPin 是单个模型的「钉上游渠道」配置。
+type ClineUpstreamPin struct {
+	// Upstreams 是按优先级排列的上游供应商 slug 列表（如 alibaba、baseten）。
+	Upstreams []string `json:"upstreams,omitempty"`
+	// Exclude 从上述列表中排除的供应商；也可在未配置 Upstreams 时用于收窄。
+	Exclude []string `json:"exclude,omitempty"`
+	// PinMode 为 strict 时只钉第一个（provider.only=[first]）；
+	// 为 preferred 时按顺序下发（provider.order），由网关在首个 token 前故障转移。
+	PinMode string `json:"pin_mode,omitempty"`
+	// Sort 为 cost / ttft / tps，或空 / none 表示不排序。
+	Sort string `json:"sort,omitempty"`
 }
 
 const (
