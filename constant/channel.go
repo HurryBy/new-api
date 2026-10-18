@@ -61,7 +61,11 @@ const (
 	ChannelTypeTaskPlugin     = 61
 	ChannelTypeVLLM           = 62
 	ChannelTypeSGLang         = 63
-	ChannelTypeDummy          // this one is only for count, do not add any channel after this
+	// ChannelTypeCline 是本地新增的 Cline Pass 渠道。
+	// 上游在 v1.0.0-rc 系列把 61-63 分配给了 TaskPlugin/VLLM/SGLang，
+	// 因此本地渠道必须取 64，否则会与 ChannelTypeTaskPlugin 撞号。
+	ChannelTypeCline   = 64
+	ChannelTypeDummy   // this one is only for count, do not add any channel after this
 
 )
 
@@ -129,9 +133,13 @@ var ChannelBaseURLs = []string{
 	"",                                          //58
 	"",                                          //59
 	"",                                          //60
-	"",                                          //61
-	"",                                          //62
-	"",                                          //63
+	"",                                          //61 TaskPlugin
+	"",                                          //62 VLLM
+	"",                                          //63 SGLang
+	// Cline Pass 网关。注意这里**不含**版本段：new-api 的请求路径自带 /v1
+	// （见 GetFullRequestURL 的 base+path 拼接约定，OpenRouter 同理），
+	// 所以存 .../api 拼出来才是官方文档里的 https://api.cline.bot/api/v1/chat/completions。
+	"https://api.cline.bot/api", //64 Cline
 }
 
 func GetChannelBaseURL(channelType int) string {
@@ -202,6 +210,7 @@ var ChannelTypeNames = map[int]string{
 	ChannelTypeTaskPlugin:     "Task Plugin",
 	ChannelTypeVLLM:           "vLLM",
 	ChannelTypeSGLang:         "SGLang",
+	ChannelTypeCline:          "Cline",
 }
 
 func GetChannelTypeName(channelType int) string {

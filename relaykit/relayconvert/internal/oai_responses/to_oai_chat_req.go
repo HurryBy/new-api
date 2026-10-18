@@ -22,6 +22,9 @@ const (
 	responsesInputTypeFunctionCallOutput = "function_call_output"
 	responsesInputTypeCustomToolCall     = "custom_tool_call"
 	responsesInputTypeCustomToolOutput   = "custom_tool_call_output"
+	// responsesInputTypeReasoning 是上一轮回答里的推理项。客户端（Codex 等）
+	// 续接会话时会把上一轮的 output 项原样回传，其中就包含它。
+	responsesInputTypeReasoning = "reasoning"
 )
 
 const (
@@ -46,6 +49,7 @@ func ResponsesRequestToChatCompletionsRequest(ctx context.Context, req *dto.Open
 	if err != nil {
 		return nil, err
 	}
+	messages = dropEmptyChatMessages(messages)
 
 	tools, err := responsesRequestToolsToChat(req.Tools)
 	if err != nil {
@@ -220,17 +224,75 @@ func responsesInputItemToChatMessages(ctx context.Context, item map[string]any, 
 		callID := strings.TrimSpace(kitutil.Interface2String(item["call_id"]))
 		content, media := responsesToolOutputToChat(ctx, item["output"])
 		return append(messages, dto.Message{Role: "tool", ToolCallId: callID, Content: content}), media, nil
+	case responsesInputTypeReasoning:
+		// 推理项在 chat completions 里没有对应的输入项，且它带的是
+		// summary（有时还有 encrypted_content）而不是 content。
+		// 以前这里没有分支，会落到下面的通用分支被当成一条**内容为空**的
+		// user 消息发出去，上游随即 400「user message must have content」；
+		// 又因为响应头已经以 200 发出，客户端只会收到一个 stream_error 事件，
+		// 表现就是「一个来回就结束、无法持续工作」。直接丢弃即可。
+		return messages, nil, nil
 	}
 
+	// 其它不支持的条目类型（web_search_call / mcp_call / item_reference 等）：
+	// 只有确实带 role 或 content 的才当作消息处理，否则一律跳过，
+	// 避免再次制造出内容为空的消息。
+	rawContent, hasContent := item["content"]
 	role := strings.TrimSpace(kitutil.Interface2String(item["role"]))
+	if role == "" && !hasContent {
+		return messages, nil, nil
+	}
 	if role == "" {
 		role = "user"
 	}
-	content, err := responsesInputContentToChatContent(ctx, item["content"])
+	content, err := responsesInputContentToChatContent(ctx, rawContent)
 	if err != nil {
 		return nil, nil, err
 	}
 	return append(messages, dto.Message{Role: role, Content: content}), nil, nil
+}
+
+// dropEmptyChatMessages 丢掉内容为空的消息。
+//
+// chat completions 上游（实测 Vercel / Cline 转发链）对空内容直接报
+// 400「user message must have content」，而 Responses 的 input 里可能夹着
+// 推理项、工具调用项等并非消息的条目，转换后容易产生空消息。
+// 这里做一道兜底：只有确实没有内容、且不是工具调用/工具结果的消息才丢，
+// 以免破坏 assistant(tool_calls) 与 tool 结果的配对。
+func dropEmptyChatMessages(messages []dto.Message) []dto.Message {
+	if len(messages) == 0 {
+		return messages
+	}
+	out := make([]dto.Message, 0, len(messages))
+	for _, message := range messages {
+		if message.Role == "tool" || len(message.ToolCalls) > 0 {
+			out = append(out, message)
+			continue
+		}
+		switch message.Role {
+		case "user", "system", "developer", "assistant":
+			if chatMessageContentEmpty(message.Content) {
+				continue
+			}
+		}
+		out = append(out, message)
+	}
+	return out
+}
+
+func chatMessageContentEmpty(content any) bool {
+	switch value := content.(type) {
+	case nil:
+		return true
+	case string:
+		return strings.TrimSpace(value) == ""
+	case []any:
+		return len(value) == 0
+	case []dto.MediaContent:
+		return len(value) == 0
+	default:
+		return false
+	}
 }
 
 func responsesInputContentToChatContent(ctx context.Context, content any) (any, error) {

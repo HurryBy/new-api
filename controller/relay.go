@@ -31,6 +31,12 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// maxMultiKeyRotationsPerRequest caps how many extra upstream attempts one request
+// may spend walking the keys of a multi-key channel. Rotation already stops when the
+// channel runs out of untried keys; this is the runaway guard for channels that hold
+// a very large key list.
+const maxMultiKeyRotationsPerRequest = 32
+
 func relayHandler(c *gin.Context, info *relaycommon.RelayInfo) *types.NewAPIError {
 	var err *types.NewAPIError
 	switch info.RelayMode {
@@ -159,16 +165,37 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
 
+	multiKeyRotations := 0
+	var keyPoolExhaustedError *types.NewAPIError
+	// While rotating through a multi-key channel's keys we stay pinned to that channel
+	// instead of re-running weighted channel selection, so the next attempt reliably
+	// lands on that channel's next untried key.
+	var pinnedChannel *model.Channel
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
 		relayInfo.StreamStatus = nil
 		relayInfo.PerformanceBusinessRejection = false
 		relayInfo.PerformanceOutputTokens = 0
-		relayInfo.RetryIndex = retryParam.GetRetry()
-		channel, channelErr := getChannel(c, relayInfo, retryParam)
-		if channelErr != nil {
-			logger.LogError(c, channelErr.Error())
-			newAPIError = channelErr
-			break
+		// multiKeyRotations 让同一次请求在粘性密钥之间轮转时仍能得到单调递增的
+		// RetryIndex（用于日志与可观测性），同时不占用全局重试预算。
+		relayInfo.RetryIndex = retryParam.GetRetry() + multiKeyRotations
+		var channel *model.Channel
+		if pinnedChannel != nil {
+			// 粘性密钥轮转：复用上一次选中的渠道，让下一次尝试落到该渠道下一个
+			// 未试过的密钥上，而不是重新跑一次加权选渠道。
+			channel = pinnedChannel
+			pinnedChannel = nil
+			if setupErr := middleware.SetupContextForSelectedChannel(c, channel, relayInfo.OriginModelName); setupErr != nil {
+				newAPIError = setupErr
+				break
+			}
+		} else {
+			var channelErr *types.NewAPIError
+			channel, channelErr = getChannel(c, relayInfo, retryParam)
+			if channelErr != nil {
+				logger.LogError(c, channelErr.Error())
+				newAPIError = channelErr
+				break
+			}
 		}
 		service.AppendUsedChannel(c, channel.Id)
 		if billingErr := service.PrepareTieredBillingForSelectedGroup(c, relayInfo); billingErr != nil {
@@ -202,6 +229,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		if newAPIError == nil {
 			service.MarkRequestPolicySuccess(c, relayInfo.StreamStatus)
 			relayInfo.LastError = nil
+			if common.GetContextKeyBool(c, constant.ContextKeyChannelIsMultiKey) {
+				model.ResetMultiKeyFailure(channel.Id, common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex))
+			}
 			return
 		}
 
@@ -212,9 +242,52 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		service.RecordPolicyFailure(c, channel.Id, newAPIError, decision)
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, relayInfo)
 
+		// Charge the failure to the key that served it. Once a key uses up the
+		// channel's retry budget it is retired, which moves the sticky cursor to the
+		// next key for every user of that channel — that switch is the whole point of
+		// sticky mode, so it does not depend on the global auto-disable settings.
+		// 判定复用上游的 DecideRelayRetry 策略，只用 retryTimes=1 表示「这一次失败
+		// 本身是否属于可重试类型」，不代表剩余全局预算。
+		if common.GetContextKeyBool(c, constant.ContextKeyChannelIsMultiKey) &&
+			service.DecideRelayRetry(c, newAPIError, 1).Action == "retry" {
+			model.RecordMultiKeyFailure(channel.Id,
+				common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex),
+				fmt.Sprintf("粘性密钥连续失败已达重试次数，自动切换到下一个密钥：%s", newAPIError.ErrorWithStatusCode()))
+		}
+
+		// A multi-key channel that still holds keys this request has not tried gets
+		// another attempt on the next key without spending the retry budget: the
+		// promise of multi-key mode is that one dead key does not fail the request.
+		// Every attempt marks its key as tried, so this ends once the keys run out.
+		rotateKey, keyPoolExhausted := multiKeyRetryDecision(c, channel.Id, newAPIError)
+		if rotateKey && multiKeyRotations < maxMultiKeyRotationsPerRequest {
+			multiKeyRotations++
+			pinnedChannel = channel
+			retryParam.ResetRetryNextTry()
+			continue
+		}
+
+		// Every key of the channel failed for this request. Report that instead of
+		// leaking the last upstream rate-limit / out-of-quota message, which says
+		// nothing about the channel being out of keys. Only the final attempt decides
+		// what the client sees, so a later attempt on another channel clears this.
+		keyPoolExhaustedError = nil
+		if keyPoolExhausted {
+			keyPoolExhaustedError = types.NewErrorWithStatusCode(
+				fmt.Errorf("渠道 #%d 密钥池已用尽，所有密钥均不可用", channel.Id),
+				types.ErrorCodeChannelNoAvailableKey,
+				http.StatusServiceUnavailable,
+				types.ErrOptionWithSkipRetry(),
+			)
+		}
+
 		if decision.Action != "retry" {
 			break
 		}
+	}
+
+	if newAPIError != nil && keyPoolExhaustedError != nil {
+		newAPIError = keyPoolExhaustedError
 	}
 
 	useChannel := c.GetStringSlice("use_channel")
@@ -299,6 +372,32 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 
 func processChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError, relayInfo *relaycommon.RelayInfo) {
 	service.ProcessChannelError(c, channelError, err, relayInfo)
+}
+
+// multiKeyRetryDecision tells the retry loop what to do after a multi-key channel
+// failed: rotate onto a key this request has not spent yet, or report the key pool as
+// exhausted. Both are false when the failure has nothing to do with the keys (a client
+// error, or a channel that is not in multi-key mode), so those errors reach the client
+// untouched. getChannel hands back a context-only channel stub on the first attempt,
+// so the multi-key flag and the key statuses are read from the request context and the
+// channel cache instead of from that stub.
+func multiKeyRetryDecision(c *gin.Context, channelId int, apiErr *types.NewAPIError) (rotate bool, exhausted bool) {
+	if !common.GetContextKeyBool(c, constant.ContextKeyChannelIsMultiKey) {
+		return false, false
+	}
+	// Same policy as a normal retry, minus the retry budget: moving to another key of
+	// the same channel is what multi-key mode promises, so it is not rationed.
+	if service.DecideRelayRetry(c, apiErr, 1).Action != "retry" {
+		return false, false
+	}
+	channel, err := model.CacheGetChannel(channelId)
+	if err != nil || channel == nil {
+		return false, false
+	}
+	if channel.HasUntriedEnabledKey(middleware.TriedMultiKeys(c, channelId)) {
+		return true, false
+	}
+	return false, true
 }
 
 func RelayMidjourney(c *gin.Context) {

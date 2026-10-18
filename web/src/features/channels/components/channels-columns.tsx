@@ -24,6 +24,7 @@ import {
   ChevronDown,
   ChevronRight,
   ListOrdered,
+  Pin,
   Shuffle,
   SlidersHorizontal,
 } from 'lucide-react'
@@ -75,6 +76,7 @@ import {
   getChannelTypeIcon,
   getChannelTypeLabel,
   getResponseTimeConfig,
+  getStickyActiveKeyIndex,
   isMultiKeyChannel,
   parseModelsList,
   parseGroupsList,
@@ -87,7 +89,7 @@ import {
   type TagRow,
 } from '../lib'
 import { parseUpstreamUpdateMeta } from '../lib/upstream-update-utils'
-import type { Channel } from '../types'
+import type { Channel, MultiKeyStrategy } from '../types'
 import { ChannelRowActionsLayoutContext } from './channel-row-actions-context'
 import { TaskPluginChannelBadge } from './channel-type-badge'
 import { useChannels } from './channels-provider'
@@ -99,6 +101,13 @@ import {
   type CodexUsageDialogData,
 } from './dialogs/codex-usage-dialog'
 import { NumericSpinnerInput } from './numeric-spinner-input'
+
+// Icon and tooltip per multi-key selection strategy; tooltips are i18n keys.
+const MULTI_KEY_MODE_BADGES = {
+  random: { icon: Shuffle, tooltip: 'Multi-key: Random rotation' },
+  polling: { icon: ListOrdered, tooltip: 'Multi-key: Polling rotation' },
+  sticky: { icon: Pin, tooltip: 'Multi-key: Sticky (first available key)' },
+} satisfies Record<MultiKeyStrategy, { icon: typeof Shuffle; tooltip: string }>
 
 function parseIonetMeta(otherInfo: string | null | undefined): null | {
   source?: string
@@ -820,13 +829,17 @@ export function useChannelsColumns(
           const iconName = getChannelTypeIcon(type)
           const channel = row.original as Channel
           const isMultiKey = isMultiKeyChannel(channel)
-          const multiKeyMode = channel.channel_info?.multi_key_mode ?? 'random'
-          const MultiKeyModeIcon =
-            multiKeyMode === 'random' ? Shuffle : ListOrdered
-          const multiKeyTooltip =
-            multiKeyMode === 'random'
-              ? t('Multi-key: Random rotation')
-              : t('Multi-key: Polling rotation')
+          // A channel created through the API may carry no explicit strategy;
+          // the backend then falls back to the first enabled key, i.e. sticky.
+          const multiKeyBadge =
+            MULTI_KEY_MODE_BADGES[
+              channel.channel_info?.multi_key_mode || 'sticky'
+            ] || MULTI_KEY_MODE_BADGES.sticky
+          const MultiKeyModeIcon = multiKeyBadge.icon
+          const multiKeyTooltip = t(multiKeyBadge.tooltip)
+          // Sticky channels serve every user from one key until it is retired, so the
+          // list shows which key that currently is (1-based, same as the key manager).
+          const stickyKeyIndex = getStickyActiveKeyIndex(channel)
 
           const ionetMeta = parseIonetMeta(channel.other_info)
           const isIonet = ionetMeta?.source === 'ionet'
@@ -842,13 +855,20 @@ export function useChannelsColumns(
                   <Tooltip>
                     <TooltipTrigger
                       render={
-                        <span className='border-border bg-muted text-primary inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md border' />
+                        <span className='border-border bg-muted text-primary inline-flex h-5 shrink-0 items-center justify-center gap-0.5 rounded-md border px-1' />
                       }
                     >
                       <MultiKeyModeIcon className='h-3 w-3' />
+                      {stickyKeyIndex !== null && (
+                        <span className='text-[10px] leading-none font-medium tabular-nums'>
+                          #{stickyKeyIndex + 1}
+                        </span>
+                      )}
                     </TooltipTrigger>
                     <TooltipContent side='top'>
-                      {multiKeyTooltip}
+                      {stickyKeyIndex === null
+                        ? multiKeyTooltip
+                        : `${multiKeyTooltip} · ${t('Current key')} #${stickyKeyIndex + 1}`}
                     </TooltipContent>
                   </Tooltip>
                 </TooltipProvider>

@@ -11,6 +11,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/model_setting"
 
 	"github.com/gin-gonic/gin"
 )
@@ -44,6 +45,23 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 			http.StatusBadRequest,
 			types.ErrOptionWithSkipRetry(),
 		)
+	}
+
+	// 上游只提供 chat completions 的渠道（Cline Pass / 只实现 chat completions 的中转网关）
+	// 无法服务 /v1/responses：原样透传会打到不存在的路径并返回 404。
+	// 这里把它降级成 chat completions 下发，再由 responses_via_chat_completions.go
+	// 把响应转回 Responses 格式。降级路径自己完成模型映射、请求转换与计费，
+	// 因此必须排在 PrepareResponsesRequest 之前。
+	if info.RelayMode != relayconstant.RelayModeResponsesCompact &&
+		!model_setting.GetGlobalSettings().PassThroughRequestEnabled &&
+		!info.ChannelSetting.PassThroughBodyEnabled &&
+		service.ShouldResponsesUseChatCompletionsGlobal(info.ChannelId, info.ChannelType, info.OriginModelName) {
+		usage, newApiErr := responsesViaChatCompletions(c, info, responsesReq)
+		if newApiErr != nil {
+			return newApiErr
+		}
+		ConsumeResponsesQuota(c, info, usage)
+		return nil
 	}
 
 	adaptor, requestBody, closer, apiErr := PrepareResponsesRequest(c, info, responsesReq)

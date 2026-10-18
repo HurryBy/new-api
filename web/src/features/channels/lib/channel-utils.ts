@@ -22,6 +22,7 @@ import { formatTimestampToDate } from '@/lib/format'
 import {
   CHANNEL_STATUS_CONFIG,
   CHANNEL_TYPES,
+  MULTI_KEY_STATUS,
   MULTI_KEY_STATUS_CONFIG,
   RESPONSE_TIME_CONFIG,
   RESPONSE_TIME_THRESHOLDS,
@@ -56,6 +57,7 @@ export function getChannelTypeIcon(type: number): string {
     60: 'NewAPI', // New API
     62: 'Vllm', // vLLM
     63: 'SGLang', // SGLang
+    64: 'OpenAI', // Cline
     3: 'Azure', // Azure
 
     // Anthropic
@@ -161,6 +163,29 @@ export function isChannelEnabled(channel: Channel): boolean {
  */
 export function isMultiKeyChannel(channel: Channel): boolean {
   return channel.channel_info?.is_multi_key || false
+}
+
+/**
+ * Zero-based index of the key a sticky multi-key channel currently serves every
+ * request from: the lowest-numbered key that is still enabled. Mirrors
+ * GetNextEnabledKey in the backend. Returns null when the channel is not sticky or
+ * has no usable key left.
+ */
+export function getStickyActiveKeyIndex(channel: Channel): number | null {
+  if (!isMultiKeyChannel(channel)) return null
+  if (channel.channel_info?.multi_key_mode !== 'sticky') return null
+
+  const size = channel.channel_info?.multi_key_size ?? 0
+  if (size <= 0) return null
+
+  const statusList = channel.channel_info?.multi_key_status_list ?? {}
+  for (let index = 0; index < size; index++) {
+    const status = statusList[String(index)]
+    if (status === undefined || status === MULTI_KEY_STATUS.ENABLED) {
+      return index
+    }
+  }
+  return null
 }
 
 // ============================================================================

@@ -89,7 +89,8 @@ func fetchInferenceStatus(ctx context.Context, channel *model.Channel) (*inferen
 	if err != nil || parsedURL.Host == "" || parsedURL.User != nil || parsedURL.RawQuery != "" || parsedURL.Fragment != "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
 		return nil, errors.New("Invalid inference server address")
 	}
-	key, _, keyErr := channel.GetNextEnabledKey()
+	// 这是一次只读的状态探测，不需要跟踪「本次请求已试过的密钥」，传 nil 即可。
+	key, _, keyErr := channel.GetNextEnabledKey(nil)
 	if keyErr != nil {
 		return nil, errors.New("No enabled channel key")
 	}

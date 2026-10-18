@@ -38,6 +38,7 @@ const (
 	ContextKeyChannelStatusCodeMapping ContextKey = "status_code_mapping"
 	ContextKeyChannelIsMultiKey        ContextKey = "channel_is_multi_key"
 	ContextKeyChannelMultiKeyIndex     ContextKey = "channel_multi_key_index"
+	ContextKeyChannelTriedMultiKeys    ContextKey = "channel_tried_multi_keys"
 	ContextKeyChannelKey               ContextKey = "channel_key"
 
 	// ContextKeyUpstreamRequestOrigin is the scheme and host of the last upstream

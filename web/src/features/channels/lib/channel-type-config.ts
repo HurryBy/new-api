@@ -180,6 +180,17 @@ export const CHANNEL_TYPE_CONFIGS: Record<number, ChannelTypeConfig> = {
       models: 'Models',
     },
   },
+  // Cline 走 64：上游已把 61/62/63 分配给 Task Plugin / vLLM / SGLang。
+  64: {
+    id: 64,
+    name: CHANNEL_TYPES[64],
+    icon: 'OpenAI',
+    hints: {
+      baseUrl: '留空则使用 Cline Pass 默认网关 https://api.cline.bot/api',
+      key: 'Cline Pass API Key（sk_ 开头）',
+      models: '例如 cline-pass/glm-5.2',
+    },
+  },
 }
 
 /**

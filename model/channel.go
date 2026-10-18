@@ -69,6 +69,26 @@ type ChannelInfo struct {
 	MultiKeyDisabledTime   map[int]int64         `json:"multi_key_disabled_time,omitempty"`   // key禁用时间列表，key index -> time
 	MultiKeyPollingIndex   int                   `json:"multi_key_polling_index"`             // 多Key模式下轮询的key索引
 	MultiKeyMode           constant.MultiKeyMode `json:"multi_key_mode"`
+	MultiKeyFailureCount   map[int]int           `json:"multi_key_failure_count,omitempty"` // key连续失败次数，key index -> count（粘性策略切换依据）
+	MultiKeyRetryTimes     int                   `json:"multi_key_retry_times,omitempty"`   // 粘性策略下单个key允许的连续失败次数，0 表示使用默认值
+}
+
+const (
+	// DefaultMultiKeyRetryTimes is how many consecutive failures a sticky key is
+	// allowed before the channel switches to the next key for every user.
+	DefaultMultiKeyRetryTimes = 3
+	// MaxMultiKeyRetryTimes bounds the per-channel setting so a misconfigured channel
+	// cannot keep a dead key in service forever.
+	MaxMultiKeyRetryTimes = 100
+)
+
+// GetMultiKeyRetryTimes returns how many consecutive failures the current key may
+// accumulate before sticky mode retires it.
+func (channel *Channel) GetMultiKeyRetryTimes() int {
+	if channel.ChannelInfo.MultiKeyRetryTimes > 0 {
+		return channel.ChannelInfo.MultiKeyRetryTimes
+	}
+	return DefaultMultiKeyRetryTimes
 }
 
 type ChannelSortOptions struct {
@@ -208,7 +228,48 @@ func (channel *Channel) GetKeys() []string {
 	return keys
 }
 
-func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
+// enabledKeyIndexes returns the ascending indexes of the keys that are still
+// enabled. Callers must hold the channel polling lock, because key statuses are
+// mutated under it by UpdateChannelStatus.
+func (channel *Channel) enabledKeyIndexes(keys []string) []int {
+	statusList := channel.ChannelInfo.MultiKeyStatusList
+	enabled := make([]int, 0, len(keys))
+	for i := range keys {
+		// A key with no recorded status is enabled.
+		if status, ok := statusList[i]; ok && status != common.ChannelStatusEnabled {
+			continue
+		}
+		enabled = append(enabled, i)
+	}
+	return enabled
+}
+
+// HasUntriedEnabledKey reports whether this multi-key channel still has an enabled
+// key that the caller has not attempted yet. tried holds the key indexes already
+// used, so the relay retry loop can decide whether another key is worth trying.
+func (channel *Channel) HasUntriedEnabledKey(tried map[int]struct{}) bool {
+	if !channel.ChannelInfo.IsMultiKey {
+		return false
+	}
+
+	lock := GetChannelPollingLock(channel.Id)
+	lock.Lock()
+	defer lock.Unlock()
+
+	for _, idx := range channel.enabledKeyIndexes(channel.GetKeys()) {
+		if _, used := tried[idx]; !used {
+			return true
+		}
+	}
+	return false
+}
+
+// GetNextEnabledKey picks the key for the next upstream call. tried holds the key
+// indexes the current request already attempted; they are skipped so a retry lands
+// on a fresh key instead of the one that just failed. Once every enabled key has
+// been tried the exclusion is dropped, so the caller still gets a usable key and
+// the client ends up seeing the real upstream error rather than a routing error.
+func (channel *Channel) GetNextEnabledKey(tried map[int]struct{}) (string, int, *types.NewAPIError) {
 	// If not in multi-key mode, return the original key string directly.
 	if !channel.ChannelInfo.IsMultiKey {
 		return channel.Key, 0, nil
@@ -225,25 +286,7 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 	lock.Lock()
 	defer lock.Unlock()
 
-	statusList := channel.ChannelInfo.MultiKeyStatusList
-	// helper to get key status, default to enabled when missing
-	getStatus := func(idx int) int {
-		if statusList == nil {
-			return common.ChannelStatusEnabled
-		}
-		if status, ok := statusList[idx]; ok {
-			return status
-		}
-		return common.ChannelStatusEnabled
-	}
-
-	// Collect indexes of enabled keys
-	enabledIdx := make([]int, 0, len(keys))
-	for i := range keys {
-		if getStatus(i) == common.ChannelStatusEnabled {
-			enabledIdx = append(enabledIdx, i)
-		}
-	}
+	enabledIdx := channel.enabledKeyIndexes(keys)
 	// If no specific status list or none enabled, return an explicit error so caller can
 	// properly handle a channel with no available keys (e.g. mark channel disabled).
 	// Returning the first key here caused requests to keep using an already-disabled key.
@@ -251,11 +294,30 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 		return "", 0, types.NewError(errors.New("no enabled keys"), types.ErrorCodeChannelNoAvailableKey)
 	}
 
+	candidateIdx := enabledIdx
+	if len(tried) > 0 {
+		untried := make([]int, 0, len(enabledIdx))
+		for _, idx := range enabledIdx {
+			if _, used := tried[idx]; !used {
+				untried = append(untried, idx)
+			}
+		}
+		if len(untried) > 0 {
+			candidateIdx = untried
+		}
+	}
+
 	switch channel.ChannelInfo.MultiKeyMode {
 	case constant.MultiKeyModeRandom:
-		// Randomly pick one enabled key
-		selectedIdx := enabledIdx[rand.Intn(len(enabledIdx))]
+		// Randomly pick one candidate key
+		selectedIdx := candidateIdx[rand.Intn(len(candidateIdx))]
 		return keys[selectedIdx], selectedIdx, nil
+	case constant.MultiKeyModeSticky:
+		// Sticky: keep hitting the lowest-indexed enabled key until it gets
+		// disabled, then move on to the next one. candidateIdx is ascending, so its
+		// first element is that key. Deliberately stateless: no cursor to persist,
+		// so every instance agrees and a re-enabled earlier key is used again.
+		return keys[candidateIdx[0]], candidateIdx[0], nil
 	case constant.MultiKeyModePolling:
 		// Use channel-specific lock to ensure thread-safe polling
 
@@ -273,24 +335,28 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 				// CacheUpdateChannel(channel)
 			}
 		}()
-		// Start from the saved polling index and look for the next enabled key
+		candidates := make(map[int]struct{}, len(candidateIdx))
+		for _, idx := range candidateIdx {
+			candidates[idx] = struct{}{}
+		}
+		// Start from the saved polling index and look for the next candidate key
 		start := channelInfo.MultiKeyPollingIndex
 		if start < 0 || start >= len(keys) {
 			start = 0
 		}
 		for i := range keys {
 			idx := (start + i) % len(keys)
-			if getStatus(idx) == common.ChannelStatusEnabled {
+			if _, ok := candidates[idx]; ok {
 				// update polling index for next call (point to the next position)
 				channel.ChannelInfo.MultiKeyPollingIndex = (idx + 1) % len(keys)
 				return keys[idx], idx, nil
 			}
 		}
-		// Fallback – should not happen, but return first enabled key
-		return keys[enabledIdx[0]], enabledIdx[0], nil
+		// Fallback – should not happen, but return first candidate key
+		return keys[candidateIdx[0]], candidateIdx[0], nil
 	default:
-		// Unknown mode, default to first enabled key (or original key string)
-		return keys[enabledIdx[0]], enabledIdx[0], nil
+		// Unknown mode, default to first candidate key (or original key string)
+		return keys[candidateIdx[0]], candidateIdx[0], nil
 	}
 }
 
@@ -598,6 +664,11 @@ func (channel *Channel) Update() error {
 				}
 			}
 		}
+		for idx := range channel.ChannelInfo.MultiKeyFailureCount {
+			if idx >= channel.ChannelInfo.MultiKeySize {
+				delete(channel.ChannelInfo.MultiKeyFailureCount, idx)
+			}
+		}
 	}
 	var err error
 	err = DB.Model(channel).Updates(channel).Error
@@ -704,6 +775,8 @@ func handlerMultiKeyUpdate(channel *Channel, usingKey string, status int, reason
 		}
 		if status == common.ChannelStatusEnabled {
 			delete(channel.ChannelInfo.MultiKeyStatusList, keyIndex)
+			// A key coming back into service starts with a clean failure streak.
+			delete(channel.ChannelInfo.MultiKeyFailureCount, keyIndex)
 		} else {
 			channel.ChannelInfo.MultiKeyStatusList[keyIndex] = status
 			if channel.ChannelInfo.MultiKeyDisabledReason == nil {
@@ -738,6 +811,84 @@ func hasEnabledMultiKey(keys []string, statusList map[int]int) bool {
 		}
 	}
 	return false
+}
+
+// countMultiKeyFailure increments the consecutive failure counter of one key and
+// reports whether it reached the channel's retry budget. It is separate from
+// RecordMultiKeyFailure so the per-channel lock is released before UpdateChannelStatus
+// takes it again to retire the key.
+func (channel *Channel) countMultiKeyFailure(keyIndex int) bool {
+	lock := GetChannelPollingLock(channel.Id)
+	lock.Lock()
+	defer lock.Unlock()
+
+	if status, ok := channel.ChannelInfo.MultiKeyStatusList[keyIndex]; ok && status != common.ChannelStatusEnabled {
+		// A concurrent request already retired this key.
+		return false
+	}
+	if channel.ChannelInfo.MultiKeyFailureCount == nil {
+		channel.ChannelInfo.MultiKeyFailureCount = make(map[int]int)
+	}
+	channel.ChannelInfo.MultiKeyFailureCount[keyIndex]++
+	retire := channel.ChannelInfo.MultiKeyFailureCount[keyIndex] >= channel.GetMultiKeyRetryTimes()
+	if retire {
+		// Retire the key inside the same lock so parallel failures on it stop counting
+		// at once instead of each triggering its own retirement; UpdateChannelStatus
+		// then records the reason and refreshes the cache and abilities.
+		if channel.ChannelInfo.MultiKeyStatusList == nil {
+			channel.ChannelInfo.MultiKeyStatusList = make(map[int]int)
+		}
+		channel.ChannelInfo.MultiKeyStatusList[keyIndex] = common.ChannelStatusAutoDisabled
+	}
+	if err := channel.SaveChannelInfo(); err != nil {
+		common.SysLog(fmt.Sprintf("failed to save multi-key failure count: channel_id=%d, key_index=%d, error=%v", channel.Id, keyIndex, err))
+	}
+	return retire
+}
+
+// RecordMultiKeyFailure charges a failed upstream call to the key that served it and
+// retires that key once it used up the channel's retry budget, which moves the sticky
+// cursor to the next key for every user of the channel. It returns true when the key
+// was retired. Random and polling already spread traffic across the pool on every
+// request, so only sticky mode retires keys this way.
+func RecordMultiKeyFailure(channelId int, keyIndex int, reason string) bool {
+	channel, err := CacheGetChannel(channelId)
+	if err != nil || channel == nil {
+		return false
+	}
+	if !channel.ChannelInfo.IsMultiKey || channel.ChannelInfo.MultiKeyMode != constant.MultiKeyModeSticky {
+		return false
+	}
+	keys := channel.GetKeys()
+	if keyIndex < 0 || keyIndex >= len(keys) {
+		return false
+	}
+	if !channel.countMultiKeyFailure(keyIndex) {
+		return false
+	}
+	common.SysLog(fmt.Sprintf("multi-key channel #%d retired key #%d after %d consecutive failures", channelId, keyIndex+1, channel.GetMultiKeyRetryTimes()))
+	return UpdateChannelStatus(channelId, keys[keyIndex], common.ChannelStatusAutoDisabled, reason)
+}
+
+// ResetMultiKeyFailure clears the failure streak of a key that just served a request
+// successfully, so unrelated one-off errors never add up to a switch.
+func ResetMultiKeyFailure(channelId int, keyIndex int) {
+	channel, err := CacheGetChannel(channelId)
+	if err != nil || channel == nil || !channel.ChannelInfo.IsMultiKey {
+		return
+	}
+
+	lock := GetChannelPollingLock(channelId)
+	lock.Lock()
+	defer lock.Unlock()
+
+	if channel.ChannelInfo.MultiKeyFailureCount[keyIndex] == 0 {
+		return
+	}
+	delete(channel.ChannelInfo.MultiKeyFailureCount, keyIndex)
+	if err := channel.SaveChannelInfo(); err != nil {
+		common.SysLog(fmt.Sprintf("failed to reset multi-key failure count: channel_id=%d, key_index=%d, error=%v", channelId, keyIndex, err))
+	}
 }
 
 func UpdateChannelStatus(channelId int, usingKey string, status int, reason string) bool {

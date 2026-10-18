@@ -388,7 +388,7 @@ func fetchChannelUpstreamModelIDs(channel *model.Channel) ([]string, error) {
 	}
 
 	if channel.Type == constant.ChannelTypeGemini {
-		key, _, apiErr := channel.GetNextEnabledKey()
+		key, _, apiErr := channel.GetNextEnabledKey(nil)
 		if apiErr != nil {
 			return nil, fmt.Errorf("failed to get channel key: %w", apiErr)
 		}
@@ -437,7 +437,7 @@ func fetchChannelUpstreamModelIDs(channel *model.Channel) ([]string, error) {
 		url = fmt.Sprintf("%s/v1/models", baseURL)
 	}
 
-	key, _, apiErr := channel.GetNextEnabledKey()
+	key, _, apiErr := channel.GetNextEnabledKey(nil)
 	if apiErr != nil {
 		return nil, fmt.Errorf("failed to get channel key: %w", apiErr)
 	}
@@ -467,7 +467,7 @@ func fetchChannelUpstreamModelIDs(channel *model.Channel) ([]string, error) {
 }
 
 func fetchAdvancedCustomUpstreamModelIDs(channel *model.Channel, baseURL string) ([]string, error) {
-	key, _, apiErr := channel.GetNextEnabledKey()
+	key, _, apiErr := channel.GetNextEnabledKey(nil)
 	if apiErr != nil {
 		return nil, fmt.Errorf("failed to get channel key: %w", apiErr)
 	}

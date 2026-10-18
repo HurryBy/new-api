@@ -16,11 +16,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import type { MultiKeyStrategy } from './types'
 
 export const CHANNEL_PRIORITY_GUIDE_KEYS = {
   card: 'channels:priority-drag-guide:card:v1',
   table: 'channels:priority-drag-guide:v1',
 } as const
+
 // ============================================================================
 // Channel Types (from constant/channel.go)
 // All label/name values are i18n keys; use t(value) when displaying.
@@ -31,6 +33,8 @@ export const CHANNEL_TYPE_OLLAMA = 4
 export const CHANNEL_TYPE_SUB2API = 59
 
 export const CHANNEL_TYPE_NEW_API = 60
+// Cline 走 64：上游已把 61/62/63 分配给 Task Plugin / vLLM / SGLang。
+export const CHANNEL_TYPE_CLINE = 64
 
 export const CHANNEL_TYPE_TASK_PLUGIN = 61
 
@@ -99,6 +103,8 @@ export const CHANNEL_TYPES = {
   61: 'Task Plugin',
   62: 'vLLM',
   63: 'SGLang',
+  // Cline 走 64：上游已把 61/62/63 分配给 Task Plugin / vLLM / SGLang。
+  64: 'Cline',
 } as const
 
 export type ChannelProviderPresentation = {
@@ -182,6 +188,11 @@ export const CHANNEL_PROVIDER_PRESENTATION: Partial<
   },
   62: { descriptionKey: 'Connect to self-hosted models served by vLLM' },
   63: { descriptionKey: 'Connect to self-hosted models served by SGLang' },
+  64: {
+    descriptionKey:
+      'Connect to Cline Pass and pin which upstream serves each model',
+    badge: { labelKey: 'Upstream pinning', tone: 'primary' },
+  },
 } satisfies Record<
   Exclude<keyof typeof CHANNEL_TYPES, 0 | typeof CHANNEL_TYPE_TASK_PLUGIN>,
   ChannelProviderPresentation
@@ -301,10 +312,39 @@ export const MULTI_KEY_STATUS_CONFIG = {
 // Multi-Key Modes
 // ============================================================================
 
-export const MULTI_KEY_MODES = [
-  { value: 'random', label: 'Random' },
-  { value: 'polling', label: 'Polling' },
-] as const
+// All label/description values are i18n keys; use t(value) when displaying.
+export const MULTI_KEY_MODES: readonly {
+  value: MultiKeyStrategy
+  label: string
+  description: string
+  /** Render the description as a warning instead of plain help text. */
+  warning?: true
+}[] = [
+  {
+    value: 'random',
+    label: 'Random',
+    description: 'Randomly select a key from the pool for each request',
+  },
+  {
+    value: 'polling',
+    label: 'Polling',
+    description:
+      'Polling mode requires Redis and memory cache, otherwise performance will be significantly degraded',
+    warning: true,
+  },
+  {
+    value: 'sticky',
+    label: 'Sticky',
+    description:
+      'Always use the first available key; only switch when that key becomes unavailable',
+  },
+]
+
+// Mirrors model.DefaultMultiKeyRetryTimes / model.MaxMultiKeyRetryTimes: how many
+// consecutive failures a sticky key may accumulate before the channel switches to the
+// next key for every user.
+export const DEFAULT_MULTI_KEY_RETRY_TIMES = 3
+export const MAX_MULTI_KEY_RETRY_TIMES = 100
 
 export const ADD_MODE_OPTIONS = [
   { value: 'single', label: 'Single Key' },
@@ -358,6 +398,8 @@ export const ERROR_MESSAGES = {
   REQUIRED_GROUP: 'Group is required',
   INVALID_JSON: 'Invalid JSON format',
   INVALID_MODEL_MAPPING: 'Invalid model mapping format',
+  INVALID_CLINE_UPSTREAM_PINS:
+    'Cline upstream pins must be a JSON object mapping model names to { upstreams, exclude, pin_mode, sort }',
   INVALID_PROXY:
     'Proxy address must use HTTP, HTTPS, SOCKS5, or SOCKS5H and include a valid host',
   INVALID_HTTP_PROTOCOL: 'HTTP protocol must be Auto or HTTP/1.1',
@@ -527,6 +569,9 @@ export const MODEL_FETCHABLE_TYPES = new Set([
   60,
   CHANNEL_TYPE_VLLM,
   CHANNEL_TYPE_SGLANG,
+  // Cline Pass：目录在 {baseURL}/models，而 new-api 的探测路径是 {baseURL}/v1/models，
+  // 默认 base 存的是 https://api.cline.bot/api，拼出来正好是官方的 /api/v1/models
+  CHANNEL_TYPE_CLINE,
 ])
 
 export const FIELD_PASSTHROUGH_TYPES = new Set([

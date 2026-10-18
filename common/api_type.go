@@ -81,6 +81,9 @@ func ChannelType2APIType(channelType int) (int, bool) {
 		apiType = constant.APITypeSub2API
 	case constant.ChannelTypeNewAPI:
 		apiType = constant.APITypeNewAPI
+	case constant.ChannelTypeCline:
+		// Cline Pass 网关是 OpenAI 兼容协议，直接复用 OpenAI 适配器
+		apiType = constant.APITypeOpenAI
 	}
 	if apiType == -1 {
 		// Task plugin channels are served by the task relay and must never
