@@ -240,6 +240,7 @@ import {
   ChannelConfigurationStatusIndicator,
 } from './channel-configuration'
 import { ChannelProviderPicker } from './channel-provider-picker'
+import { ClineProbePanel } from './cline-probe-panel'
 import {
   ChannelApiAccessSection,
   ChannelAuthSection,
@@ -2880,76 +2881,83 @@ export function ChannelMutateDrawer({
         />
 
         {currentType === CHANNEL_TYPE_CLINE && (
-          <FormField
-            control={form.control}
-            name='cline_upstream_pins'
-            render={({ field }) => (
-              <FormItem className='space-y-3 border-t pt-4'>
-                <div className='flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between'>
-                  <div className='space-y-1'>
-                    <FormLabel>{t('Cline Upstream Pins')}</FormLabel>
-                    <FormDescription>
-                      {t(
-                        'Pin the upstream that serves each model, so a request does not silently land on a different provider.'
-                      )}
-                    </FormDescription>
-                  </div>
-                  <div className='flex flex-wrap gap-2'>
-                    <Button
-                      type='button'
-                      variant='outline'
-                      size='sm'
-                      onClick={() =>
-                        field.onChange(
-                          JSON.stringify(
-                            {
-                              'cline-pass/glm-5.2': {
-                                upstreams: ['z-ai'],
-                                pin_mode: 'strict',
+          <>
+            <ClineProbePanel
+              channelId={channelId ?? undefined}
+              models={parseModelsString(form.getValues('models') || '')}
+              disabled={sensitiveLocked || isSubmitting}
+            />
+            <FormField
+              control={form.control}
+              name='cline_upstream_pins'
+              render={({ field }) => (
+                <FormItem className='space-y-3 border-t pt-4'>
+                  <div className='flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between'>
+                    <div className='space-y-1'>
+                      <FormLabel>{t('Cline Upstream Pins')}</FormLabel>
+                      <FormDescription>
+                        {t(
+                          'Pin the upstream that serves each model, so a request does not silently land on a different provider.'
+                        )}
+                      </FormDescription>
+                    </div>
+                    <div className='flex flex-wrap gap-2'>
+                      <Button
+                        type='button'
+                        variant='outline'
+                        size='sm'
+                        onClick={() =>
+                          field.onChange(
+                            JSON.stringify(
+                              {
+                                'cline-pass/glm-5.2': {
+                                  upstreams: ['z-ai'],
+                                  pin_mode: 'strict',
+                                },
                               },
-                            },
-                            null,
-                            2
+                              null,
+                              2
+                            )
                           )
-                        )
-                      }
-                    >
-                      <Code className='mr-2 h-4 w-4' />
-                      {t('Fill Template')}
-                    </Button>
-                    <Button
-                      type='button'
-                      variant='ghost'
-                      size='sm'
-                      onClick={() => field.onChange('')}
-                    >
-                      {t('Clear')}
-                    </Button>
+                        }
+                      >
+                        <Code className='mr-2 h-4 w-4' />
+                        {t('Fill Template')}
+                      </Button>
+                      <Button
+                        type='button'
+                        variant='ghost'
+                        size='sm'
+                        onClick={() => field.onChange('')}
+                      >
+                        {t('Clear')}
+                      </Button>
+                    </div>
                   </div>
-                </div>
-                <FormControl>
-                  <JsonCodeEditor
-                    value={field.value || ''}
-                    onChange={field.onChange}
-                    name={field.name}
-                    onBlur={field.onBlur}
-                    textareaRef={field.ref}
-                    disabled={sensitiveLocked || isSubmitting}
-                    placeholder={t(
-                      'Enter JSON to pin Cline upstreams per model'
+                  <FormControl>
+                    <JsonCodeEditor
+                      value={field.value || ''}
+                      onChange={field.onChange}
+                      name={field.name}
+                      onBlur={field.onBlur}
+                      textareaRef={field.ref}
+                      disabled={sensitiveLocked || isSubmitting}
+                      placeholder={t(
+                        'Enter JSON to pin Cline upstreams per model'
+                      )}
+                      heightClassName='h-40 min-h-40 max-h-40'
+                    />
+                  </FormControl>
+                  <FormDescription className='text-xs'>
+                    {t(
+                      'Keys are model names. upstreams lists providers in priority order; exclude removes providers; pin_mode is strict or preferred; sort is cost, ttft, tps, or none.'
                     )}
-                    heightClassName='h-40 min-h-40 max-h-40'
-                  />
-                </FormControl>
-                <FormDescription className='text-xs'>
-                  {t(
-                    'Keys are model names. upstreams lists providers in priority order; exclude removes providers; pin_mode is strict or preferred; sort is cost, ttft, tps, or none.'
-                  )}
-                </FormDescription>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </>
         )}
       </fieldset>
     </div>

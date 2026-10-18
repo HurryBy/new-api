@@ -17,6 +17,13 @@ import (
 )
 
 func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types.NewAPIError) {
+	// ChannelMeta 必须先初始化：下面的降级判断要读 ChannelId / ChannelType /
+	// ChannelSetting，而这些字段都从内嵌的 *ChannelMeta 提升而来。
+	// 上游把这次初始化移进了 PrepareResponsesRequest，但降级判断排在它之前，
+	// 所以这里必须自己先初始化一次，否则 ChannelMeta 为 nil，降级永远不会触发。
+	// InitChannelMeta 可重复调用，PrepareResponsesRequest 再调一次是安全的。
+	info.InitChannelMeta(c)
+
 	var responsesReq *dto.OpenAIResponsesRequest
 	switch req := info.Request.(type) {
 	case *dto.OpenAIResponsesRequest:
