@@ -54,8 +54,7 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 	// 因此必须排在 PrepareResponsesRequest 之前。
 	if info.RelayMode != relayconstant.RelayModeResponsesCompact &&
 		!model_setting.GetGlobalSettings().PassThroughRequestEnabled &&
-		!info.ChannelSetting.PassThroughBodyEnabled &&
-		service.ShouldResponsesUseChatCompletionsGlobal(info.ChannelId, info.ChannelType, info.OriginModelName) {
+		shouldDowngradeResponsesToChat(info) {
 		usage, newApiErr := responsesViaChatCompletions(c, info, responsesReq)
 		if newApiErr != nil {
 			return newApiErr
@@ -116,6 +115,24 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 
 	ConsumeResponsesQuota(c, info, usageDto)
 	return nil
+}
+
+// shouldDowngradeResponsesToChat reports whether this /v1/responses request must be
+// served as chat completions because the upstream has no Responses endpoint.
+//
+// ChannelId, ChannelType and ChannelSetting are all promoted from the embedded
+// *ChannelMeta, which only InitChannelMeta allocates; the WebSocket path reaches this
+// handler before that happens. Treat a missing ChannelMeta as "no pass-through
+// configured", which is also its zero value, and skip the policy lookup that needs
+// the channel identity.
+func shouldDowngradeResponsesToChat(info *relaycommon.RelayInfo) bool {
+	if info.ChannelMeta == nil {
+		return false
+	}
+	if info.ChannelSetting.PassThroughBodyEnabled {
+		return false
+	}
+	return service.ShouldResponsesUseChatCompletionsGlobal(info.ChannelId, info.ChannelType, info.OriginModelName)
 }
 
 // ConsumeResponsesQuota applies the same settlement dispatch to HTTP and
