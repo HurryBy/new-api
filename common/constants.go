@@ -11,7 +11,10 @@ import (
 )
 
 var StartTime = time.Now().Unix() // unit: second
-var Version = "v0.0.0"            // this hard coding will be replaced automatically when building, no need to manually change
+// Version 是构建时写入的版本号（发布流水线用 -ldflags -X 覆盖）。
+// 这里保留一个非 v0.0.0 的默认值，好让本地/自建直接 go build 出来的产物
+// 也能和官方发行版区分开；官方发行版仍会被 -X 覆盖成对应 tag。
+var Version = "v1.0.0-rc.45-clinepass"
 var SystemName = "New API"
 var Footer = ""
 var Logo = ""
