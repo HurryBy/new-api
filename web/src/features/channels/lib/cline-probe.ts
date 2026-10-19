@@ -18,6 +18,8 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { api, type ApiRequestConfig } from '@/lib/api'
 
+import type { ClineUpstreamPin } from '../types'
+
 /**
  * Result of pinning one concrete upstream during a probe.
  *
@@ -66,6 +68,45 @@ export interface ClineProbeResult {
   models: ClineModelProbe[]
 }
 
+/**
+ * Persisted probe snapshot for one model.
+ *
+ * The backend stores the last probe so reopening the channel drawer shows the
+ * candidate upstreams without spending another round of upstream calls.
+ */
+export interface ClineProbeModelSnapshot {
+  model: string
+  reachable?: boolean
+  pipeline?: 'gateway' | 'direct'
+  /** The upstream the gateway picked on its own, i.e. its default. */
+  defaultProvider?: string
+  canonicalSlug?: string
+  pinnable?: boolean
+  upstreams?: ClineProbeUpstreamSnapshot[]
+  error?: string
+  detail?: string
+}
+
+export interface ClineProbeUpstreamSnapshot {
+  upstream: string
+  /** Mirrors the backend classification: ok / limited / bad / auth / unknown. */
+  status: ClineUpstreamStatus
+  finalProvider?: string
+  /** Whether a pin to this upstream was actually obeyed by the gateway. */
+  held?: boolean
+  note?: string
+}
+
+export interface ClineProbeSnapshot {
+  /** Unix seconds. */
+  sampledAt: number
+  models: ClineProbeModelSnapshot[]
+  /** Currently saved pins, so the panel can render the real state on load. */
+  pins: ClineUpstreamPins
+}
+
+export type ClineUpstreamPins = Record<string, ClineUpstreamPin>
+
 interface ClineProbeResponse {
   success: boolean
   message?: string
@@ -107,8 +148,8 @@ export async function fetchClineSubscriptionModels(): Promise<string[]> {
  * Probe a Cline Pass channel: report which upstream is really serving each
  * model and whether the configured pin actually holds.
  *
- * `models` is optional; when omitted the backend probes every model configured
- * on the channel.
+ * The backend persists the result as the channel's probe snapshot, so the next
+ * visit to the drawer still has the candidate list.
  */
 export async function probeClineChannel(
   id: number,
@@ -124,4 +165,44 @@ export async function probeClineChannel(
     throw new Error(body.message || 'Probe failed')
   }
   return body.data
+}
+
+/**
+ * Read the channel's persisted probe snapshot together with its saved pins.
+ *
+ * Returns null when the channel has never been probed, which is different from a
+ * failed request: the empty state tells the user to run a probe first.
+ */
+export async function fetchClineProbeSnapshot(
+  id: number
+): Promise<{ snapshot: ClineProbeSnapshot | null; pins: ClineUpstreamPins }> {
+  const res = await api.get<{
+    success: boolean
+    message?: string
+    data?: { snapshot: ClineProbeSnapshot | null; pins: ClineUpstreamPins }
+  }>(`/api/channel/${id}/cline/probe`)
+  const body = res.data
+  if (!body.success || !body.data) {
+    throw new Error(body.message || 'Failed to load probe result')
+  }
+  const snapshot = body.data.snapshot
+  return {
+    snapshot: snapshot && snapshot.models?.length ? snapshot : null,
+    pins: body.data.pins ?? {},
+  }
+}
+
+/** Replace the channel's pin configuration with `pins`. */
+export async function saveClineUpstreamPins(
+  id: number,
+  pins: ClineUpstreamPins
+): Promise<void> {
+  const res = await api.put<{ success: boolean; message?: string }>(
+    `/api/channel/${id}/cline/pins`,
+    { pins }
+  )
+  const body = res.data
+  if (!body.success) {
+    throw new Error(body.message || 'Failed to save pins')
+  }
 }

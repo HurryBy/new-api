@@ -104,6 +104,10 @@ const clineProbeMaxTokens = 2048
 // clineProbeModelConcurrency 限制并发探测的模型数，避免触发上游限流。
 const clineProbeModelConcurrency = 2
 
+// clineProbeMaxCandidates 限制每个模型实测钉选的候选上游数量。
+// 逐个试全部候选太慢且容易触发限流；两个「非默认」候选足以判定能否钉住。
+const clineProbeMaxCandidates = 2
+
 // ProbeClineChannel 探测一个 Cline 渠道：对每个模型各发一次普通请求记录真实
 // 走的管道与上游，再逐个候选渠道下发钉选来验证「是否真的钉住了」。
 //
@@ -174,6 +178,232 @@ func ProbeClineChannel(ctx context.Context, channel *model.Channel, models []str
 		return nil, context.Canceled
 	}
 	return result, nil
+}
+
+// Snapshot 把一次探测结果压成可持久化的快照。
+//
+// 快照只保留管理端展示候选渠道与钉选结论所需的信息，不含任何密钥，
+// 也不参与转发决策；它存在的意义是让用户下次打开渠道就能看到上次探测的结果。
+func (result *ClineProbeResult) Snapshot() dto.ClineProbeSnapshot {
+	snapshot := dto.ClineProbeSnapshot{
+		SampledAt: result.SampledAt / 1000,
+		Models:    make([]dto.ClineProbeModelSnapshot, 0, len(result.Models)),
+	}
+	for _, model := range result.Models {
+		entry := dto.ClineProbeModelSnapshot{
+			Model:           model.Model,
+			Reachable:       model.Reachable,
+			Pipeline:        model.Pipeline,
+			DefaultProvider: model.FinalProvider,
+			CanonicalSlug:   model.CanonicalSlug,
+			Pinnable:        model.Pinnable,
+			Error:           model.Error,
+			Detail:          model.Detail,
+		}
+
+		// 候选清单取「默认上游 + 实测过的候选」，默认上游排在最前，
+		// 这样管理端能同时看到网关的默认选择与其它可选渠道。
+		seen := make(map[string]struct{}, len(model.Upstreams)+1)
+		appendUpstream := func(upstream dto.ClineProbeUpstreamSnapshot) {
+			if upstream.Upstream == "" {
+				return
+			}
+			if _, dup := seen[upstream.Upstream]; dup {
+				return
+			}
+			seen[upstream.Upstream] = struct{}{}
+			entry.Upstreams = append(entry.Upstreams, upstream)
+		}
+		if model.FinalProvider != "" {
+			appendUpstream(dto.ClineProbeUpstreamSnapshot{
+				Upstream:      model.FinalProvider,
+				Status:        string(ClineUpstreamOK),
+				FinalProvider: model.FinalProvider,
+				Held:          true,
+				Note:          "default",
+			})
+		}
+		for _, attempt := range model.Upstreams {
+			appendUpstream(dto.ClineProbeUpstreamSnapshot{
+				Upstream:      attempt.Upstream,
+				Status:        string(attempt.Status),
+				FinalProvider: attempt.FinalProvider,
+				Held: attempt.Status == ClineUpstreamOK &&
+					attempt.FinalProvider == attempt.Upstream,
+				Note: attempt.Note,
+			})
+		}
+		// 探测过但没有实测的其余候选（被 maxCandidates 截断的那些）仍然列出，
+		// 让用户知道它们存在且可以尝试钉选。
+		for _, name := range model.Available {
+			appendUpstream(dto.ClineProbeUpstreamSnapshot{
+				Upstream: name,
+				Status:   string(ClineUpstreamUnknown),
+			})
+		}
+
+		snapshot.Models = append(snapshot.Models, entry)
+	}
+	return snapshot
+}
+
+// ReadClineProbeSnapshot 读取渠道上的探测快照，没有则返回 nil。
+func ReadClineProbeSnapshot(channel *model.Channel) *dto.ClineProbeSnapshot {
+	if channel == nil {
+		return nil
+	}
+	snapshot := channel.GetSetting().ClineProbeSnapshot
+	if snapshot == nil || len(snapshot.Models) == 0 {
+		return nil
+	}
+	return snapshot
+}
+
+// SaveClineProbeSnapshot 把探测结果写回渠道的 setting 并刷新内存缓存。
+//
+// 只改动 ClineProbeSnapshot 一个字段，其余 setting（含钉选配置、代理、
+// 多密钥状态等）原样保留，避免探测顺带覆盖用户手工改过的设置。
+func SaveClineProbeSnapshot(channel *model.Channel, snapshot dto.ClineProbeSnapshot) error {
+	if channel == nil || channel.Id <= 0 {
+		return errors.New("channel is required")
+	}
+	if channel.Type != constant.ChannelTypeCline {
+		return errors.New("This operation is only supported for Cline channels")
+	}
+
+	// 重新读一次最新行，避免用请求开始时读到的旧 setting 覆盖并发修改。
+	latest, err := model.GetChannelById(channel.Id, true)
+	if err != nil {
+		return err
+	}
+	setting := latest.GetSetting()
+	setting.ClineProbeSnapshot = &snapshot
+	latest.SetSetting(setting)
+	if err := latest.Update(); err != nil {
+		return err
+	}
+	model.InitChannelCache()
+	return nil
+}
+
+// clinePinModes 是允许的钉选模式。
+var clinePinModes = []string{"strict", "preferred"}
+
+// clinePinSorts 是允许的排序偏好。
+var clinePinSorts = []string{"cost", "ttft", "tps"}
+
+// NormalizeClineUpstreamPins 校验并归一化管理端提交的钉选配置。
+//
+// 空输入表示「没有任何钉选」，返回 nil 以便从 setting 中彻底移除该字段。
+// 未知的 pin_mode / sort 会被拒绝而不是静默丢弃，避免用户以为设置生效了。
+func NormalizeClineUpstreamPins(pins map[string]dto.ClineUpstreamPin) (map[string]dto.ClineUpstreamPin, error) {
+	if len(pins) == 0 {
+		return nil, nil
+	}
+	normalized := make(map[string]dto.ClineUpstreamPin, len(pins))
+	for rawModel, pin := range pins {
+		name := strings.TrimSpace(rawModel)
+		if name == "" {
+			return nil, errors.New("Model name is required for every pin")
+		}
+		upstreams := normalizeClinePinNames(pin.Upstreams)
+		exclude := normalizeClinePinNames(pin.Exclude)
+		// exclude 优先于 upstreams，避免同一渠道既被钉又被排除。
+		if len(exclude) > 0 {
+			filtered := upstreams[:0]
+			for _, upstream := range upstreams {
+				if !slices.Contains(exclude, upstream) {
+					filtered = append(filtered, upstream)
+				}
+			}
+			upstreams = filtered
+		}
+
+		mode := strings.TrimSpace(pin.PinMode)
+		if mode != "" && !slices.Contains(clinePinModes, mode) {
+			return nil, errors.New("Invalid pin mode: " + mode)
+		}
+		if mode == "" && len(upstreams) > 0 {
+			// 默认 strict：只钉第一个，语义最接近用户「就选它」的直觉。
+			mode = "strict"
+		}
+
+		sort := strings.TrimSpace(pin.Sort)
+		if sort == "none" {
+			sort = ""
+		}
+		if sort != "" && !slices.Contains(clinePinSorts, sort) {
+			return nil, errors.New("Invalid pin sort: " + sort)
+		}
+
+		if len(upstreams) == 0 && len(exclude) == 0 && sort == "" {
+			// 这项配置没有任何实际内容，不落库。
+			continue
+		}
+		normalized[name] = dto.ClineUpstreamPin{
+			Upstreams: upstreams,
+			Exclude:   exclude,
+			PinMode:   mode,
+			Sort:      sort,
+		}
+	}
+	if len(normalized) == 0 {
+		return nil, nil
+	}
+	return normalized, nil
+}
+
+// normalizeClinePinNames 去空白、去重并保持顺序。
+func normalizeClinePinNames(names []string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" || slices.Contains(result, name) {
+			continue
+		}
+		result = append(result, name)
+	}
+	return result
+}
+
+// SaveClineUpstreamPins 把钉选配置写回渠道 setting 并刷新内存缓存。
+//
+// 只改 setting.cline_upstream_pins，其余字段原样保留。
+func SaveClineUpstreamPins(channel *model.Channel, pins map[string]dto.ClineUpstreamPin) error {
+	if channel == nil || channel.Id <= 0 {
+		return errors.New("channel is required")
+	}
+	if channel.Type != constant.ChannelTypeCline {
+		return errors.New("This operation is only supported for Cline channels")
+	}
+
+	latest, err := model.GetChannelById(channel.Id, true)
+	if err != nil {
+		return err
+	}
+	setting := latest.GetSetting()
+	setting.ClineUpstreamPins = pins
+	latest.SetSetting(setting)
+	if err := latest.Update(); err != nil {
+		return err
+	}
+	model.InitChannelCache()
+	return nil
+}
+
+// ReadClineUpstreamPins 读取渠道当前的钉选配置，没有则返回空 map。
+func ReadClineUpstreamPins(channel *model.Channel) map[string]dto.ClineUpstreamPin {
+	if channel == nil {
+		return nil
+	}
+	pins := channel.GetSetting().ClineUpstreamPins
+	if len(pins) == 0 {
+		return nil
+	}
+	return pins
 }
 
 // ClineSubscriptionModels 是 Cline Pass 订阅模型的已知清单。
@@ -298,6 +528,12 @@ func (p *clineProber) probeModel(ctx context.Context, name string) ClineModelPro
 // 否则把一个请求钉到它自己会落到的地方，即使网关完全忽略钉选也会显示成功，
 // 那就等于给用户一个假的「已钉住」。这里只保留「非默认」的候选。
 func pickClinePinCandidates(reply clineProbeReply) []string {
+	return pickClinePinCandidatesLimited(reply, clineProbeMaxCandidates)
+}
+
+// pickClinePinCandidatesLimited 与 pickClinePinCandidates 相同，但限制候选数量。
+// 逐个试全部候选可能很慢且容易触发限流，因此只取前几个「非默认」候选。
+func pickClinePinCandidatesLimited(reply clineProbeReply, limit int) []string {
 	candidates := make([]string, 0, len(reply.available))
 	for _, name := range reply.available {
 		name = strings.TrimSpace(name)
@@ -309,10 +545,8 @@ func pickClinePinCandidates(reply clineProbeReply) []string {
 		}
 		candidates = append(candidates, name)
 	}
-	// 逐个试全部候选可能很慢且容易触发限流；两个「非默认」候选足以判定。
-	const maxCandidates = 2
-	if len(candidates) > maxCandidates {
-		candidates = candidates[:maxCandidates]
+	if limit > 0 && len(candidates) > limit {
+		candidates = candidates[:limit]
 	}
 	return candidates
 }

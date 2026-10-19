@@ -40,6 +40,56 @@ type ChannelSettings struct {
 	// 语义移植自 dsh-cline-pass 的 pin：出站请求体注入 provider.only/order/sort
 	// 与 providerOptions.gateway.*。
 	ClineUpstreamPins map[string]ClineUpstreamPin `json:"cline_upstream_pins,omitempty"`
+	// ClineProbeSnapshot 保存最近一次上游探测的结果，让管理端下次打开渠道
+	// 就能看到上次探测到的候选渠道，而不必重新探测。
+	//
+	// 它是**观测快照**：写在这里只是为了持久化展示，转发逻辑从不读取它，
+	// 因此它即使过期也不会影响路由；前端会按 sampled_at 提示数据新鲜度。
+	ClineProbeSnapshot *ClineProbeSnapshot `json:"cline_probe_snapshot,omitempty"`
+}
+
+// ClineProbeSnapshot 是某个 Cline 渠道最近一次探测结果的持久化快照。
+type ClineProbeSnapshot struct {
+	// SampledAt 是探测时刻的 Unix 秒，用于提示数据新鲜度。
+	SampledAt int64 `json:"sampled_at"`
+	// Models 按模型保存探测到的候选上游与结论。
+	Models []ClineProbeModelSnapshot `json:"models,omitempty"`
+}
+
+// ClineProbeModelSnapshot 是单个模型的探测快照。
+type ClineProbeModelSnapshot struct {
+	// Model 是探测时使用的上游模型名。
+	Model string `json:"model"`
+	// Reachable 表示探测请求本身拿到了回复。
+	Reachable bool `json:"reachable,omitempty"`
+	// Pipeline 是网关实际走的管道：gateway 或 direct。
+	Pipeline string `json:"pipeline,omitempty"`
+	// DefaultProvider 是未下发钉选时网关自报的上游，代表它的默认选择。
+	DefaultProvider string `json:"default_provider,omitempty"`
+	// CanonicalSlug 是网关内部的真实模型 ID。
+	CanonicalSlug string `json:"canonical_slug,omitempty"`
+	// Pinnable 表示实测该模型的上游能否被客户端钉住。
+	Pinnable bool `json:"pinnable,omitempty"`
+	// Upstreams 是逐个实测过的候选上游（含结论与是否真的被采纳）。
+	Upstreams []ClineProbeUpstreamSnapshot `json:"upstreams,omitempty"`
+	// Error 是探测失败时的归类原因。
+	Error string `json:"error,omitempty"`
+	// Detail 是给排查用的简短说明。
+	Detail string `json:"detail,omitempty"`
+}
+
+// ClineProbeUpstreamSnapshot 是单个候选上游的探测结论。
+type ClineProbeUpstreamSnapshot struct {
+	// Upstream 是上游供应商 slug。
+	Upstream string `json:"upstream"`
+	// Status 是结论：ok / limited / bad / auth / unknown。
+	Status string `json:"status"`
+	// FinalProvider 是钉到该上游后网关实际使用的上游，用于判断钉选是否生效。
+	FinalProvider string `json:"final_provider,omitempty"`
+	// Held 表示这次钉选是否真的被网关采纳。
+	Held bool `json:"held,omitempty"`
+	// Note 是简短说明。
+	Note string `json:"note,omitempty"`
 }
 
 // ClineUpstreamPin 是单个模型的「钉上游渠道」配置。

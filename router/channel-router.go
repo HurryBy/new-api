@@ -84,6 +84,8 @@ var channelPermissionRoutes = []permissionRoute{
 	{method: http.MethodGet, path: "/:id/sglang/status", permission: authz.ChannelRead, handler: controller.GetSGLangChannelStatus},
 	// 探测会真实调用上游并可能产生极少费用，因此要求渠道操作权限，不是只读权限。
 	{method: http.MethodPost, path: "/:id/cline/probe", permission: authz.ChannelOperate, handler: controller.ProbeClineChannelUpstreams},
+	{method: http.MethodGet, path: "/:id/cline/probe", permission: authz.ChannelRead, handler: controller.GetClineProbeSnapshot},
+	{method: http.MethodPut, path: "/:id/cline/pins", permission: authz.ChannelOperate, handler: controller.UpdateClineUpstreamPins},
 	{method: http.MethodGet, path: "/cline/models", permission: authz.ChannelRead, handler: controller.GetClineSubscriptionModels},
 	{method: http.MethodPost, path: "/fetch_models", permission: authz.ChannelSensitiveWrite, handler: controller.FetchModels},
 	{method: http.MethodPost, path: "/:id/codex/refresh", permission: authz.ChannelSensitiveWrite, handler: controller.RefreshCodexChannelCredential},

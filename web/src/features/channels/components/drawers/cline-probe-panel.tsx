@@ -18,10 +18,12 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { CheckmarkCircle02Icon } from '@hugeicons/core-free-icons'
 import { HugeiconsIcon } from '@hugeicons/react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import dayjs from 'dayjs'
 import { Loader2, RefreshCw } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
 
 import { MultiSelect } from '@/components/multi-select'
 import { Badge } from '@/components/ui/badge'
@@ -30,10 +32,15 @@ import { handleServerError } from '@/lib/handle-server-error'
 import { cn } from '@/lib/utils'
 
 import {
+  fetchClineProbeSnapshot,
   fetchClineSubscriptionModels,
   probeClineChannel,
-  type ClineModelProbe,
+  saveClineUpstreamPins,
+  type ClineProbeModelSnapshot,
   type ClineProbeResult,
+  type ClineProbeSnapshot,
+  type ClineProbeUpstreamSnapshot,
+  type ClineUpstreamPins,
   type ClineUpstreamResult,
   type ClineUpstreamStatus,
 } from '../../lib/cline-probe'
@@ -73,230 +80,420 @@ function upstreamStatusLabelKey(status: ClineUpstreamStatus): string {
   }
 }
 
-/**
- * Verdict badge for one model probe.
- *
- * A nominally pinnable pipeline whose pin was ignored is an explicit third
- * state: reporting it as "not supported" would hide that the gateway accepted
- * and discarded the pin.
- */
-function PinVerdictBadge(props: { probe: ClineModelProbe }) {
+/** A pinned upstream plus a badge that states plainly whether it took effect. */
+function PinnedUpstreamChip(props: {
+  upstream: string
+  held: boolean
+  onRemove: () => void
+  disabled?: boolean
+}) {
   const { t } = useTranslation()
-  if (props.probe.pinnedHeld) {
-    return <Badge>{t('Pin holds')}</Badge>
-  }
-  if (props.probe.pinnable) {
-    return <Badge variant='outline'>{t('Pin ignored by gateway')}</Badge>
-  }
-  return <Badge variant='outline'>{t('Pinning not supported')}</Badge>
+
+  return (
+    <span
+      className={cn(
+        'inline-flex items-center gap-1.5 rounded-md border px-2 py-1 font-mono text-xs',
+        props.held
+          ? 'border-primary/40 bg-primary/10'
+          : 'border-dashed border-muted-foreground/40 bg-muted/40'
+      )}
+    >
+      <HugeiconsIcon
+        icon={CheckmarkCircle02Icon}
+        className={cn(
+          'size-3.5',
+          props.held ? 'text-primary' : 'text-muted-foreground'
+        )}
+        aria-hidden='true'
+      />
+      {props.upstream}
+      <Badge
+        variant={props.held ? 'default' : 'outline'}
+        className='h-4 px-1 text-[10px]'
+      >
+        {props.held ? t('Confirmed') : t('Pending verification')}
+      </Badge>
+      <button
+        type='button'
+        onClick={props.onRemove}
+        disabled={props.disabled}
+        className='text-muted-foreground hover:text-foreground disabled:opacity-50'
+        aria-label={t('Unpin {{upstream}}', {
+          upstream: props.upstream,
+        })}
+      >
+        ×
+      </button>
+    </span>
+  )
 }
 
 /**
- * Probe a Cline Pass channel and report, per model, which upstream the gateway
- * really used and whether the configured pin actually held.
+ * Candidate upstream button: one click pins it, another click unpins it.
  *
- * This is intentionally an *observation* tool. The Cline gateway pins plain
- * OpenRouter models but silently ignores pins for `cline-pass/*` subscription
- * models, so the panel reports `pinnedHeld` rather than assuming success.
+ * `held` means a real probe saw the gateway honour a pin to this upstream, which
+ * is the only state that earns the "Confirmed" styling.
+ */
+function CandidateUpstreamButton(props: {
+  upstream: string
+  status: ClineUpstreamStatus
+  pinned: boolean
+  held: boolean
+  onToggle: () => void
+  disabled?: boolean
+}) {
+  const { t } = useTranslation()
+
+  return (
+    <button
+      type='button'
+      onClick={props.onToggle}
+      disabled={props.disabled}
+      aria-pressed={props.pinned}
+      className={cn(
+        'inline-flex items-center gap-1.5 rounded-md border px-2 py-1 font-mono text-xs transition-colors disabled:opacity-50',
+        props.pinned
+          ? 'border-primary bg-primary/10'
+          : 'border-border hover:bg-accent'
+      )}
+    >
+      <span>{props.upstream}</span>
+      {props.pinned && (
+        <Badge
+          variant={props.held ? 'default' : 'outline'}
+          className='h-4 px-1 text-[10px]'
+        >
+          {props.held ? t('Confirmed') : t('Pin ignored by gateway')}
+        </Badge>
+      )}
+      {!props.pinned && (
+        <Badge
+          variant={UPSTREAM_STATUS_TONE[props.status]}
+          className='h-4 px-1 text-[10px]'
+        >
+          {t(upstreamStatusLabelKey(props.status))}
+        </Badge>
+      )}
+      {props.pinned ? (
+        <span className='text-primary text-[10px]'>{t('Pinned')}</span>
+      ) : (
+        <span className='text-muted-foreground text-[10px]'>{t('Pin')}</span>
+      )}
+    </button>
+  )
+}
+
+/** One model block: verdict, candidate upstream buttons, and pinned summary. */
+function ModelPinSection(props: {
+  snapshot: ClineProbeModelSnapshot
+  pinnedUpstreams: string[]
+  onToggleUpstream: (upstream: string) => void
+  disabled?: boolean
+}) {
+  const { t } = useTranslation()
+  const upstreams = props.snapshot.upstreams ?? []
+  const isHeld = (upstream: string) =>
+    upstreams.some((item) => item.upstream === upstream && item.held)
+
+  return (
+    <div className='space-y-2 rounded-lg border p-3'>
+      <div className='flex flex-wrap items-center gap-2'>
+        <span className='font-mono text-sm break-all'>
+          {props.snapshot.model}
+        </span>
+        {typeof props.snapshot.reachable === 'boolean' && (
+          <Badge variant={props.snapshot.reachable ? 'default' : 'destructive'}>
+            {props.snapshot.reachable ? t('Reachable') : t('Unreachable')}
+          </Badge>
+        )}
+        {props.snapshot.pipeline && (
+          <Badge variant='outline'>{props.snapshot.pipeline}</Badge>
+        )}
+        {props.snapshot.defaultProvider && (
+          <span className='text-muted-foreground text-xs'>
+            {t('Default upstream')}:{' '}
+            <span className='font-mono'>{props.snapshot.defaultProvider}</span>
+          </span>
+        )}
+      </div>
+
+      {props.snapshot.error && (
+        <p className='text-destructive text-xs break-all'>
+          {props.snapshot.error}
+          {props.snapshot.detail ? ` — ${props.snapshot.detail}` : ''}
+        </p>
+      )}
+
+      {props.pinnedUpstreams.length > 0 && (
+        <div className='flex flex-wrap items-center gap-2'>
+          <span className='text-muted-foreground text-xs'>
+            {t('Pinned upstreams')}:
+          </span>
+          {props.pinnedUpstreams.map((upstream) => (
+            <PinnedUpstreamChip
+              key={upstream}
+              upstream={upstream}
+              held={isHeld(upstream)}
+              onRemove={() => props.onToggleUpstream(upstream)}
+              disabled={props.disabled}
+            />
+          ))}
+        </div>
+      )}
+
+      {upstreams.length > 0 ? (
+        <div className='space-y-1.5'>
+          <span className='text-muted-foreground text-xs'>
+            {t('Click an upstream to pin it')}
+          </span>
+          <div className='flex flex-wrap items-center gap-2'>
+            {upstreams.map((item: ClineProbeUpstreamSnapshot) => (
+              <CandidateUpstreamButton
+                key={item.upstream}
+                upstream={item.upstream}
+                status={item.status}
+                pinned={props.pinnedUpstreams.includes(item.upstream)}
+                held={item.held === true}
+                onToggle={() => props.onToggleUpstream(item.upstream)}
+                disabled={props.disabled}
+              />
+            ))}
+          </div>
+        </div>
+      ) : (
+        <p className='text-muted-foreground text-xs'>
+          {t('No candidate upstreams found for this model')}
+        </p>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Probe a Cline Pass channel, keep the result, and let the admin pin upstreams
+ * with a click.
+ *
+ * The probe result is persisted on the channel, so reopening this drawer shows
+ * the previous candidate list instead of forcing another (paid, slow) probe. The
+ * pin configuration is saved through its own endpoint so it survives without
+ * having to submit the whole channel form.
  */
 export function ClineProbePanel(props: ClineProbePanelProps) {
   const { t } = useTranslation()
-  const [result, setResult] = useState<ClineProbeResult | null>(null)
+  const queryClient = useQueryClient()
   const [isProbing, setIsProbing] = useState(false)
+  const [isSaving, setIsSaving] = useState(false)
   const [selected, setSelected] = useState<string[]>([])
+  const [draftPins, setDraftPins] = useState<ClineUpstreamPins | null>(null)
 
-  // Cline Pass subscription models cannot be enumerated from /v1/models, so the
-  // selectable catalogue comes from the backend.
+  // Cline Pass subscription models are absent from the gateway's /v1/models, so
+  // the suggestion list comes from the backend.
   const catalogue = useQuery({
     queryKey: ['channel', 'cline', 'subscription-models'],
     queryFn: fetchClineSubscriptionModels,
     staleTime: 5 * 60 * 1000,
+    enabled: Boolean(props.channelId),
   })
 
-  // Offer the catalogue plus whatever the channel already configures, so a
-  // custom model name is selectable too.
-  const options = useMemo(() => {
-    const names = new Set<string>([...(catalogue.data ?? []), ...props.models])
-    return [...names].sort().map((name) => ({ value: name, label: name }))
+  // Snapshot of the last probe, restored so pins remain operable across visits.
+  const snapshotQuery = useQuery({
+    queryKey: ['channel', 'cline', 'probe-snapshot', props.channelId],
+    queryFn: () => fetchClineProbeSnapshot(props.channelId as number),
+    enabled: Boolean(props.channelId),
+    staleTime: 0,
+  })
+
+  const modelOptions = useMemo(() => {
+    const merged = new Set<string>(catalogue.data ?? [])
+    for (const model of props.models) merged.add(model)
+    return [...merged]
+      .filter(Boolean)
+      .sort()
+      .map((value) => ({ value, label: value }))
   }, [catalogue.data, props.models])
 
-  const canProbe = Boolean(props.channelId) && !props.disabled && !isProbing
+  const snapshot: ClineProbeSnapshot | null =
+    snapshotQuery.data?.snapshot ?? null
+  // Start from the channel's saved pins so the panel shows the real current
+  // state; a local edit takes over until it is saved or discarded.
+  const savedPins: ClineUpstreamPins = snapshotQuery.data?.pins ?? {}
+  const pins: ClineUpstreamPins = draftPins ?? savedPins
+  const isDirty =
+    draftPins !== null &&
+    JSON.stringify(draftPins) !== JSON.stringify(savedPins)
 
-  async function runProbe() {
+  const pinnedFor = (model: string): string[] => pins[model]?.upstreams ?? []
+
+  const toggleUpstream = (model: string, upstream: string) => {
+    setDraftPins((current) => {
+      const base: ClineUpstreamPins = current ? { ...current } : {}
+      const existing: string[] = base[model]?.upstreams ?? []
+      const nextUpstreams = existing.includes(upstream)
+        ? existing.filter((name) => name !== upstream)
+        : [...existing, upstream]
+
+      if (nextUpstreams.length === 0) {
+        delete base[model]
+      } else {
+        base[model] = { ...base[model], upstreams: nextUpstreams }
+      }
+      return base
+    })
+  }
+
+  const runProbe = async () => {
     if (!props.channelId) return
     setIsProbing(true)
     try {
-      // An empty selection probes every model configured on the channel.
-      const probed = await probeClineChannel(props.channelId, selected)
-      setResult(probed)
+      const result: ClineProbeResult = await probeClineChannel(
+        props.channelId,
+        selected
+      )
+      // The backend already persisted the snapshot; refresh from the server so
+      // the rendered candidate list is exactly what was stored.
+      await queryClient.invalidateQueries({
+        queryKey: ['channel', 'cline', 'probe-snapshot', props.channelId],
+      })
+      toast.success(t('Probe finished'))
+      return result
     } catch (error) {
-      handleServerError(error, t('Failed to probe Cline upstreams'))
+      handleServerError(error, t('Probe failed'))
     } finally {
       setIsProbing(false)
     }
   }
 
+  const savePins = async () => {
+    if (!props.channelId) return
+    setIsSaving(true)
+    try {
+      await saveClineUpstreamPins(props.channelId, pins)
+      setDraftPins(null)
+      await queryClient.invalidateQueries({
+        queryKey: ['channel', 'cline', 'probe-snapshot', props.channelId],
+      })
+      toast.success(t('Pins saved'))
+    } catch (error) {
+      handleServerError(error, t('Failed to save pins'))
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  const pinnedCount = Object.values(pins).reduce(
+    (total, pin) => total + (pin.upstreams?.length ?? 0),
+    0
+  )
+
   return (
     <div className={cn('space-y-3 border-t pt-4', props.className)}>
-      <div className='space-y-1'>
-        <div className='text-sm font-medium'>{t('Upstream probe')}</div>
-        <p className='text-muted-foreground text-xs'>
-          {t(
-            'Pick the models to check, then ask the gateway which upstream really serves each one and whether pinning it takes effect.'
-          )}
-        </p>
-      </div>
-
-      <div className='space-y-1'>
-        <div className='text-muted-foreground text-xs'>
-          {t('Models to probe')}
+      <div className='flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between'>
+        <div className='space-y-1'>
+          <h4 className='text-sm font-medium'>{t('Cline upstream pins')}</h4>
+          <p className='text-muted-foreground text-xs'>
+            {t(
+              'Probe the channel, then click an upstream to pin it. Pins survive closing this drawer.'
+            )}
+          </p>
         </div>
-        <MultiSelect
-          options={options}
-          selected={selected}
-          onChange={setSelected}
-          allowCreate
-          disabled={props.disabled || isProbing}
-          placeholder={t('Leave empty to probe every configured model')}
-          createLabel={t('Add "{{value}}"')}
-          emptyText={t('No matching models')}
-        />
+        <Button
+          type='button'
+          variant='outline'
+          size='sm'
+          onClick={runProbe}
+          disabled={props.disabled || isProbing || !props.channelId}
+        >
+          {isProbing ? (
+            <Loader2 className='mr-2 h-4 w-4 animate-spin' />
+          ) : (
+            <RefreshCw className='mr-2 h-4 w-4' />
+          )}
+          {snapshot ? t('Probe again') : t('Probe channel')}
+        </Button>
       </div>
-
-      <Button
-        type='button'
-        variant='outline'
-        size='sm'
-        disabled={!canProbe}
-        onClick={runProbe}
-      >
-        {isProbing ? (
-          <Loader2 className='mr-2 h-4 w-4 animate-spin' />
-        ) : (
-          <RefreshCw className='mr-2 h-4 w-4' />
-        )}
-        {isProbing ? t('Probing…') : t('Probe upstreams')}
-      </Button>
 
       {!props.channelId && (
         <p className='text-muted-foreground text-xs'>
-          {t('Save the channel before probing its upstreams.')}
+          {t('Save the channel first, then probe it for upstream candidates.')}
         </p>
       )}
 
-      {result && result.models.length === 0 && (
+      {props.channelId && (
+        <div className='space-y-1.5'>
+          <span className='text-xs font-medium'>{t('Models to probe')}</span>
+          <MultiSelect
+            options={modelOptions}
+            selected={selected}
+            onChange={setSelected}
+            placeholder={t('Leave empty to probe every configured model')}
+            disabled={props.disabled || isProbing}
+            allowCreate
+          />
+        </div>
+      )}
+
+      {snapshot && (
         <p className='text-muted-foreground text-xs'>
-          {t('No models to probe on this channel.')}
+          {t('Probed at {{time}}', {
+            time: dayjs(snapshot.sampledAt * 1000).format(
+              'YYYY-MM-DD HH:mm:ss'
+            ),
+          })}
         </p>
       )}
 
-      {result?.models.map((probe) => (
-        <ClineModelProbeCard key={probe.model} probe={probe} />
-      ))}
-    </div>
-  )
-}
-
-function ClineModelProbeCard(props: { probe: ClineModelProbe }) {
-  const { t } = useTranslation()
-  const { probe } = props
-
-  return (
-    <div className='bg-muted/40 space-y-2 rounded-md border p-3'>
-      <div className='flex flex-wrap items-center gap-2'>
-        <span className='font-mono text-xs break-all'>{probe.model}</span>
-        {probe.reachable ? (
-          <Badge variant='secondary'>
-            <HugeiconsIcon
-              icon={CheckmarkCircle02Icon}
-              className='mr-1 h-3 w-3'
+      {snapshot?.models.length ? (
+        <div className='space-y-3'>
+          {snapshot.models.map((model) => (
+            <ModelPinSection
+              key={model.model}
+              snapshot={model}
+              pinnedUpstreams={pinnedFor(model.model)}
+              onToggleUpstream={(upstream) =>
+                toggleUpstream(model.model, upstream)
+              }
+              disabled={props.disabled || isProbing}
             />
-            {t('Reachable')}
-          </Badge>
-        ) : (
-          <Badge variant='destructive'>{t('Unreachable')}</Badge>
-        )}
-        <PinVerdictBadge probe={probe} />
-      </div>
-
-      <dl className='text-muted-foreground grid grid-cols-1 gap-1 text-xs sm:grid-cols-2'>
-        {probe.pipeline && (
-          <div className='flex gap-1'>
-            <dt className='shrink-0'>{t('Pipeline')}:</dt>
-            <dd className='font-mono'>{probe.pipeline}</dd>
-          </div>
-        )}
-        {probe.finalProvider && (
-          <div className='flex gap-1'>
-            <dt className='shrink-0'>{t('Served by')}:</dt>
-            <dd className='font-mono break-all'>{probe.finalProvider}</dd>
-          </div>
-        )}
-        {probe.requestedPin && (
-          <div className='flex gap-1'>
-            <dt className='shrink-0'>{t('Verified pin')}:</dt>
-            <dd className='font-mono break-all'>{probe.requestedPin}</dd>
-          </div>
-        )}
-        {probe.elapsedMs > 0 && (
-          <div className='flex gap-1'>
-            <dt className='shrink-0'>{t('Latency')}:</dt>
-            <dd>{probe.elapsedMs} ms</dd>
-          </div>
-        )}
-      </dl>
-
-      {!probe.pinnedHeld && probe.pinnable && (
-        <p className='text-xs text-amber-600 dark:text-amber-500'>
-          {t(
-            'This model stays on the provider chosen by the gateway even when a pin is sent, so the pin is not enforced.'
-          )}
+          ))}
+        </div>
+      ) : (
+        <p className='text-muted-foreground text-xs'>
+          {snapshotQuery.isLoading
+            ? t('Loading previous probe result')
+            : t('No probe result yet. Run a probe to see candidate upstreams.')}
         </p>
       )}
 
-      {probe.available && probe.available.length > 0 && (
-        <div className='space-y-1'>
-          <div className='text-muted-foreground text-xs'>
-            {t('Candidate upstreams')}
-          </div>
-          <div className='flex flex-wrap gap-1'>
-            {probe.available.map((name) => (
-              <Badge key={name} variant='outline' className='font-mono text-xs'>
-                {name}
-              </Badge>
-            ))}
-          </div>
+      {isDirty && (
+        <div className='flex flex-wrap items-center gap-2'>
+          <Button
+            type='button'
+            size='sm'
+            onClick={savePins}
+            disabled={props.disabled || isSaving}
+          >
+            {isSaving && <Loader2 className='mr-2 h-4 w-4 animate-spin' />}
+            {t('Save {{count}} pins', { count: pinnedCount })}
+          </Button>
+          <Button
+            type='button'
+            variant='ghost'
+            size='sm'
+            onClick={() => setDraftPins(null)}
+            disabled={props.disabled || isSaving}
+          >
+            {t('Discard changes')}
+          </Button>
         </div>
-      )}
-
-      {probe.upstreams && probe.upstreams.length > 0 && (
-        <div className='space-y-1'>
-          <div className='text-muted-foreground text-xs'>
-            {t('Pin verification attempts')}
-          </div>
-          <div className='space-y-1'>
-            {probe.upstreams.map((attempt) => (
-              <ClineUpstreamAttemptRow
-                key={attempt.upstream}
-                attempt={attempt}
-              />
-            ))}
-          </div>
-        </div>
-      )}
-
-      {(probe.error || probe.detail) && (
-        <p className='text-destructive text-xs break-all'>
-          {probe.error}
-          {probe.error && probe.detail ? ' — ' : ''}
-          {probe.detail}
-        </p>
       )}
     </div>
   )
 }
 
-function ClineUpstreamAttemptRow(props: { attempt: ClineUpstreamResult }) {
+/** One pinned-attempt row, kept for the verbose probe details. */
+export function ClineUpstreamAttemptRow(props: {
+  attempt: ClineUpstreamResult
+}) {
   const { t } = useTranslation()
   const tone = UPSTREAM_STATUS_TONE[props.attempt.status]
 

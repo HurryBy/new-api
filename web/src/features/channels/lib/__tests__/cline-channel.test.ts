@@ -24,7 +24,6 @@ import {
   CHANNEL_FORM_DEFAULT_VALUES,
   buildSettingJSON,
   channelFormSchema,
-  parseClineUpstreamPins,
   transformChannelToFormDefaults,
 } from '../channel-form'
 import { getChannelTypeConfig } from '../channel-type-config'
@@ -100,85 +99,52 @@ describe('Cline channel', () => {
     ).toBe(true)
   })
 
-  test('normalizes configured pins and drops empty fields', () => {
-    const pins = parseClineUpstreamPins(
-      '{"cline-pass/glm-5.2":{"upstreams":[" alibaba ","baseten",""],"exclude":["legacy"],"pin_mode":"preferred","sort":"cost"},"cline-pass/other":{"upstreams":[],"sort":""}}'
-    )
-
-    expect(pins).toEqual({
-      'cline-pass/glm-5.2': {
-        upstreams: ['alibaba', 'baseten'],
-        exclude: ['legacy'],
-        pin_mode: 'preferred',
-        sort: 'cost',
+  test('preserves the probe panel keys when the form saves an unrelated field', () => {
+    const stored = JSON.stringify({
+      force_format: false,
+      cline_upstream_pins: {
+        'cline-pass/glm-5.2': { upstreams: ['alibaba'], pin_mode: 'strict' },
       },
-      'cline-pass/other': {},
+      cline_probe_snapshot: {
+        sampled_at: 1700000000,
+        models: [{ model: 'cline-pass/glm-5.2' }],
+      },
     })
-    expect(parseClineUpstreamPins('   ')).toBeNull()
-    expect(parseClineUpstreamPins(undefined)).toBeNull()
-  })
 
-  test('rejects pins that are not a model-to-pin object', () => {
-    const invalidInputs = [
-      '[]',
-      '"model"',
-      '{"cline-pass/glm-5.2": 1}',
-      '{"   ": {}}',
-      '{"cline-pass/glm-5.2": {"upstreams": "alibaba"}}',
-      '{"cline-pass/glm-5.2": {"upstreams": [7]}}',
-      '{"cline-pass/glm-5.2": {"pin_mode": "sequential"}}',
-      '{"cline-pass/glm-5.2": {"sort": "latency"}}',
-      '{not json}',
-    ]
+    const rebuilt = JSON.parse(buildSettingJSON(clineForm(), stored))
 
-    for (const invalid of invalidInputs) {
-      expect(() => parseClineUpstreamPins(invalid)).toThrow()
-
-      const result = channelFormSchema.safeParse(
-        clineForm({ cline_upstream_pins: invalid })
-      )
-      expect(result.success).toBe(false)
-      if (!result.success) {
-        expect(result.error.issues[0]?.path[0]).toBe('cline_upstream_pins')
-      }
-    }
-  })
-
-  test('writes pins into the setting JSON only when configured', () => {
-    const withoutPins = JSON.parse(buildSettingJSON(clineForm()))
-    expect('cline_upstream_pins' in withoutPins).toBe(false)
-
-    const withPins = JSON.parse(
-      buildSettingJSON(
-        clineForm({
-          cline_upstream_pins:
-            '{"cline-pass/glm-5.2":{"upstreams":["alibaba"],"pin_mode":"strict"}}',
-        })
-      )
-    )
-
-    expect(withPins.cline_upstream_pins).toEqual({
+    expect(rebuilt.cline_upstream_pins).toEqual({
       'cline-pass/glm-5.2': { upstreams: ['alibaba'], pin_mode: 'strict' },
     })
+    expect(rebuilt.cline_probe_snapshot).toEqual({
+      sampled_at: 1700000000,
+      models: [{ model: 'cline-pass/glm-5.2' }],
+    })
   })
 
-  test('round-trips pins between the stored setting and the form field', () => {
-    const stored =
-      '{"cline-pass/glm-5.2":{"upstreams":["alibaba","baseten"],"pin_mode":"preferred","sort":"cost"}}'
+  test('omits the probe panel keys when the channel has none stored', () => {
+    const rebuilt = JSON.parse(
+      buildSettingJSON(clineForm(), '{"force_format":false}')
+    )
+
+    expect('cline_upstream_pins' in rebuilt).toBe(false)
+    expect('cline_probe_snapshot' in rebuilt).toBe(false)
+  })
+
+  test('saves the rest of the setting even when the stored JSON is unreadable', () => {
+    const rebuilt = JSON.parse(buildSettingJSON(clineForm(), '{not json}'))
+
+    expect(rebuilt.force_format).toBe(false)
+    expect('cline_upstream_pins' in rebuilt).toBe(false)
+  })
+
+  test('keeps pins out of the form so the probe panel owns them', () => {
     const form = transformChannelToFormDefaults(
-      clineChannel(`{"force_format":false,"cline_upstream_pins":${stored}}`)
+      clineChannel(
+        '{"force_format":false,"cline_upstream_pins":{"cline-pass/glm-5.2":{"upstreams":["alibaba"]}}}'
+      )
     )
 
-    expect(JSON.parse(form.cline_upstream_pins || '')).toEqual(
-      JSON.parse(stored)
-    )
-    expect(JSON.parse(buildSettingJSON(form)).cline_upstream_pins).toEqual(
-      JSON.parse(stored)
-    )
-
-    expect(
-      transformChannelToFormDefaults(clineChannel('{"force_format":false}'))
-        .cline_upstream_pins
-    ).toBe('')
+    expect('cline_upstream_pins' in form).toBe(false)
   })
 })

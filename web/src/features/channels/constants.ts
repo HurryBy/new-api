@@ -398,8 +398,6 @@ export const ERROR_MESSAGES = {
   REQUIRED_GROUP: 'Group is required',
   INVALID_JSON: 'Invalid JSON format',
   INVALID_MODEL_MAPPING: 'Invalid model mapping format',
-  INVALID_CLINE_UPSTREAM_PINS:
-    'Cline upstream pins must be a JSON object mapping model names to { upstreams, exclude, pin_mode, sort }',
   INVALID_PROXY:
     'Proxy address must use HTTP, HTTPS, SOCKS5, or SOCKS5H and include a valid host',
   INVALID_HTTP_PROTOCOL: 'HTTP protocol must be Auto or HTTP/1.1',

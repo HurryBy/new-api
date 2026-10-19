@@ -71,7 +71,10 @@ export function useChannelMutateForm(props: UseChannelMutateFormParams) {
       if (props.isEditing && props.currentRow) {
         const payload = transformFormDataToUpdatePayload(
           data,
-          props.currentRow.id
+          props.currentRow.id,
+          // The probe panel stores pins and its snapshot through its own
+          // endpoint; passing the stored setting keeps them from being erased.
+          props.currentRow.setting
         )
         if (!data.key?.trim()) {
           delete payload.key

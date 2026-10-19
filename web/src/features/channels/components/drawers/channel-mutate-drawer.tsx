@@ -307,7 +307,6 @@ const SENSITIVE_FORM_FIELDS = [
   'pass_through_body_enabled',
   'responses_websocket_enabled',
   'system_prompt',
-  'cline_upstream_pins',
   'system_prompt_override',
   'allow_service_tier',
   'disable_store',
@@ -2881,83 +2880,11 @@ export function ChannelMutateDrawer({
         />
 
         {currentType === CHANNEL_TYPE_CLINE && (
-          <>
-            <ClineProbePanel
-              channelId={channelId ?? undefined}
-              models={parseModelsString(form.getValues('models') || '')}
-              disabled={sensitiveLocked || isSubmitting}
-            />
-            <FormField
-              control={form.control}
-              name='cline_upstream_pins'
-              render={({ field }) => (
-                <FormItem className='space-y-3 border-t pt-4'>
-                  <div className='flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between'>
-                    <div className='space-y-1'>
-                      <FormLabel>{t('Cline Upstream Pins')}</FormLabel>
-                      <FormDescription>
-                        {t(
-                          'Pin the upstream that serves each model, so a request does not silently land on a different provider.'
-                        )}
-                      </FormDescription>
-                    </div>
-                    <div className='flex flex-wrap gap-2'>
-                      <Button
-                        type='button'
-                        variant='outline'
-                        size='sm'
-                        onClick={() =>
-                          field.onChange(
-                            JSON.stringify(
-                              {
-                                'cline-pass/glm-5.2': {
-                                  upstreams: ['z-ai'],
-                                  pin_mode: 'strict',
-                                },
-                              },
-                              null,
-                              2
-                            )
-                          )
-                        }
-                      >
-                        <Code className='mr-2 h-4 w-4' />
-                        {t('Fill Template')}
-                      </Button>
-                      <Button
-                        type='button'
-                        variant='ghost'
-                        size='sm'
-                        onClick={() => field.onChange('')}
-                      >
-                        {t('Clear')}
-                      </Button>
-                    </div>
-                  </div>
-                  <FormControl>
-                    <JsonCodeEditor
-                      value={field.value || ''}
-                      onChange={field.onChange}
-                      name={field.name}
-                      onBlur={field.onBlur}
-                      textareaRef={field.ref}
-                      disabled={sensitiveLocked || isSubmitting}
-                      placeholder={t(
-                        'Enter JSON to pin Cline upstreams per model'
-                      )}
-                      heightClassName='h-40 min-h-40 max-h-40'
-                    />
-                  </FormControl>
-                  <FormDescription className='text-xs'>
-                    {t(
-                      'Keys are model names. upstreams lists providers in priority order; exclude removes providers; pin_mode is strict or preferred; sort is cost, ttft, tps, or none.'
-                    )}
-                  </FormDescription>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-          </>
+          <ClineProbePanel
+            channelId={channelId ?? undefined}
+            models={parseModelsString(form.getValues('models') || '')}
+            disabled={sensitiveLocked || isSubmitting}
+          />
         )}
       </fieldset>
     </div>
