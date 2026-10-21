@@ -3,6 +3,7 @@ package helper
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,6 +21,71 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type failingStreamWriter struct {
+	*httptest.ResponseRecorder
+	writeErr, flushErr error
+	deadline           time.Time
+	boundedWrite       bool
+}
+
+func (w *failingStreamWriter) SetWriteDeadline(deadline time.Time) error {
+	w.deadline = deadline
+	return nil
+}
+
+func (w *failingStreamWriter) WriteString(data string) (int, error) {
+	w.boundedWrite = !w.deadline.IsZero()
+	if w.writeErr != nil {
+		return 0, w.writeErr
+	}
+	return w.ResponseRecorder.WriteString(data)
+}
+
+func (w *failingStreamWriter) FlushError() error {
+	return w.flushErr
+}
+
+func TestStreamWriteFailureClosesUpstreamAndClearsDeadline(t *testing.T) {
+	for _, failure := range []string{"write", "flush"} {
+		t.Run(failure, func(t *testing.T) {
+			wantErr := errors.New("client transport failed")
+			writer := &failingStreamWriter{ResponseRecorder: httptest.NewRecorder()}
+			if failure == "write" {
+				writer.writeErr = wantErr
+			} else {
+				writer.flushErr = wantErr
+			}
+			c, _ := gin.CreateTestContext(writer)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			reader, upstream := io.Pipe()
+			defer reader.Close()
+			defer upstream.Close()
+			info := &relaycommon.RelayInfo{DisablePing: true, ChannelMeta: &relaycommon.ChannelMeta{}}
+			done := make(chan struct{})
+			go func() {
+				StreamScannerHandler(c, &http.Response{Body: reader}, info, func(data string, sr *StreamResult) {
+					if err := StringData(c, data); err != nil {
+						sr.Stop(err)
+					}
+				})
+				close(done)
+			}()
+			_, err := io.WriteString(upstream, "data: first\n\n")
+			require.NoError(t, err)
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("failed write did not stop the upstream reader")
+			}
+			assert.ErrorIs(t, info.StreamStatus.EndError, wantErr)
+			assert.True(t, writer.boundedWrite, "a blocked write must have a deadline")
+			assert.True(t, writer.deadline.IsZero(), "the write deadline must not remain armed while idle")
+			_, err = io.WriteString(upstream, "data: more\n\n")
+			assert.ErrorIs(t, err, io.ErrClosedPipe)
+		})
+	}
+}
 
 func init() {
 	gin.SetMode(gin.TestMode)

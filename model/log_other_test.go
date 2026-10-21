@@ -82,3 +82,56 @@ func TestLogOtherJSONStringDoesNotMutateReceiver(t *testing.T) {
 	require.Equal(t, before, after)
 	require.Equal(t, first, second)
 }
+
+// TestUserProjectionHidesUpstreamIdentity guards the rule that a non-admin caller
+// never sees which provider served the request, while the requested model stays
+// visible and administrators keep the diagnostics they need to investigate.
+func TestUserProjectionHidesUpstreamIdentity(t *testing.T) {
+	other := NewLogOther()
+	require.True(t, other.SetPublic("request_path", "/v1/chat/completions"))
+	require.True(t, other.SetAdmin("upstream_model_name", "cline-pass/deepseek-v4.1-flash"))
+	require.True(t, other.SetAdmin("response_model", map[string]any{
+		"requested_model": "deepseek-v4.1-flash",
+		"upstream_model":  "cline-pass/deepseek-v4.1-flash",
+		"returned_model":  "deepseek/deepseek-v4.1-flash",
+	}))
+	require.True(t, other.SetAdmin("use_channel", []string{"channel-a"}))
+	stored := other.JSONString()
+
+	userVisible := formatLogOtherJSON(stored, logOtherVisibilityUser)
+	require.JSONEq(t, `{"request_path":"/v1/chat/completions"}`, userVisible)
+
+	adminVisible := formatLogOtherJSON(stored, logOtherVisibilityAdmin)
+	assert.NotContains(t, adminVisible, `"root_info"`)
+	assert.Contains(t, adminVisible, "cline-pass/deepseek-v4.1-flash")
+
+	rootVisible := formatLogOtherJSON(stored, logOtherVisibilityRoot)
+	assert.Contains(t, rootVisible, "cline-pass/deepseek-v4.1-flash")
+}
+
+// TestLegacyUpstreamFieldsAreStrippedFromUserView covers rows written before the
+// administrator-scope split: they carry the upstream name in the public top level,
+// so the projection itself has to remove it rather than relying on the writer.
+func TestLegacyUpstreamFieldsAreStrippedFromUserView(t *testing.T) {
+	legacy := `{"request_path":"/v1/chat/completions","is_model_mapped":true,` +
+		`"upstream_model_name":"cline-pass/deepseek-v4.1-flash",` +
+		`"response_model":{"requested_model":"deepseek-v4.1-flash",` +
+		`"upstream_model":"cline-pass/deepseek-v4.1-flash",` +
+		`"returned_model":"deepseek/deepseek-v4.1-flash"}}`
+
+	userVisible := formatLogOtherJSON(legacy, logOtherVisibilityUser)
+	require.JSONEq(t, `{"request_path":"/v1/chat/completions","is_model_mapped":true}`, userVisible)
+	assert.NotContains(t, userVisible, "cline-pass")
+
+	// Administrators and root keep reading the historical row as written.
+	for name, visibility := range map[string]logOtherVisibility{
+		"admin": logOtherVisibilityAdmin,
+		"root":  logOtherVisibilityRoot,
+	} {
+		assert.Contains(t, formatLogOtherJSON(legacy, visibility), "cline-pass", name)
+	}
+
+	// A writer must not be able to recreate the old shape.
+	assert.False(t, NewLogOther().SetPublic("upstream_model_name", "cline-pass/x"))
+	assert.False(t, NewLogOther().SetPublic("response_model", map[string]any{}))
+}

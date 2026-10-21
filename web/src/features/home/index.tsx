@@ -26,8 +26,10 @@ import { useTheme } from '@/context/theme-provider'
 import { isLikelyHtml } from '@/lib/content-format'
 import { useAuthStore } from '@/stores/auth-store'
 
-import { CTA, Features, Hero, HowItWorks, Stats } from './components'
+import { AstralLanding } from './components/astral-landing'
 import { useHomePageContent } from './hooks'
+
+import '@/styles/astral-home.css'
 
 export function Home() {
   const { i18n, t } = useTranslation()
@@ -121,13 +123,11 @@ export function Home() {
   }
 
   return (
-    <PublicLayout showMainContainer={false}>
-      <Hero isAuthenticated={isAuthenticated} />
-      <Stats />
-      <Features />
-      <HowItWorks />
-      <CTA isAuthenticated={isAuthenticated} />
-      <Footer />
-    </PublicLayout>
+    <div className='astral-home dark'>
+      <PublicLayout showMainContainer={false}>
+        <AstralLanding isAuthenticated={isAuthenticated} />
+        <Footer className='astral-footer' />
+      </PublicLayout>
+    </div>
   )
 }

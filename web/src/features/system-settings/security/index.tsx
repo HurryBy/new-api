@@ -42,6 +42,12 @@ const defaultSecuritySettings: SecuritySettings = {
   'fetch_setting.allowed_ports': [],
   'fetch_setting.apply_ip_filter_for_domain': false,
   'token_setting.max_user_tokens': 1000,
+  'redact_setting.enabled': false,
+  'redact_setting.patterns': [],
+  'redact_setting.mask': '***',
+  'redact_setting.mask_error_messages': true,
+  'redact_setting.mask_model_names': true,
+  'redact_setting.use_channel_upstream_names': true,
 }
 
 export function SecuritySettings() {

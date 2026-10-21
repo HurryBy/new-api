@@ -21,6 +21,7 @@ import { SSRFSection } from '../request-limits/ssrf-section'
 import { TokenLimitSection } from '../request-limits/token-limit-section'
 import type { SecuritySettings } from '../types'
 import { createSectionRegistry } from '../utils/section-registry'
+import { RedactSection } from './redact-section'
 
 const SECURITY_SECTIONS = [
   {
@@ -73,6 +74,25 @@ const SECURITY_SECTIONS = [
         defaultValues={{
           'token_setting.max_user_tokens':
             settings['token_setting.max_user_tokens'],
+        }}
+      />
+    ),
+  },
+  {
+    id: 'redaction',
+    titleKey: 'Sensitive keyword redaction',
+    build: (settings: SecuritySettings) => (
+      <RedactSection
+        defaultValues={{
+          'redact_setting.enabled': settings['redact_setting.enabled'],
+          'redact_setting.patterns': settings['redact_setting.patterns'],
+          'redact_setting.mask': settings['redact_setting.mask'],
+          'redact_setting.mask_error_messages':
+            settings['redact_setting.mask_error_messages'],
+          'redact_setting.mask_model_names':
+            settings['redact_setting.mask_model_names'],
+          'redact_setting.use_channel_upstream_names':
+            settings['redact_setting.use_channel_upstream_names'],
         }}
       />
     ),

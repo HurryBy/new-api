@@ -36,7 +36,7 @@ export function parseModelsString(modelsStr: string): string[] {
  * Format models array to string
  */
 export function formatModelsArray(models: string[]): string {
-  return Array.from(new Set(models)).join(',')
+  return [...new Set(models)].join(',')
 }
 
 /**
@@ -65,7 +65,7 @@ export function extractMappingSourceModels(modelMapping: string): string[] {
       .map((key) => key.trim())
       .filter(Boolean)
 
-    return Array.from(new Set(keys))
+    return [...new Set(keys)]
   } catch {
     return []
   }
@@ -90,10 +90,48 @@ export function extractRedirectModels(modelMapping: string): string[] {
       .map((value) => (typeof value === 'string' ? value.trim() : undefined))
       .filter((value): value is string => Boolean(value))
 
-    return Array.from(new Set(values))
+    return [...new Set(values)]
   } catch {
     return []
   }
+}
+
+/** Resolve chained redirects for display without rewriting channel settings. */
+export function resolveModelMappingTargets(
+  modelMapping: string
+): Map<string, string> {
+  const targets = new Map<string, string>()
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(modelMapping)
+  } catch {
+    return targets
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return targets
+  }
+  const entries = Object.entries(parsed)
+  if (entries.some(([, value]) => typeof value !== 'string')) return targets
+  const mapping = new Map(entries as [string, string][])
+  for (const source of mapping.keys()) {
+    const visited = new Set<string>()
+    let target = source
+    for (
+      let next = mapping.get(target);
+      next && next !== target;
+      next = mapping.get(target)
+    ) {
+      if (visited.has(target)) {
+        // An invalid cycle has no upstream target; keep the source visible.
+        target = source
+        break
+      }
+      visited.add(target)
+      target = next
+    }
+    targets.set(source, target)
+  }
+  return targets
 }
 
 /**
@@ -157,7 +195,7 @@ export function findMissingModelsInMapping(
     .map((key) => normalizeModelName(key))
     .filter((key) => key && !modelSet.has(key))
 
-  return Array.from(new Set(missingModels))
+  return [...new Set(missingModels)]
 }
 
 /**
@@ -239,9 +277,7 @@ export function categorizeModelsWithRedirect(
   ])
 
   const redirectOnlySet = new Set(
-    Array.from(normalizedRedirectModels).filter(
-      (m) => !normalizedCurrentModels.has(m)
-    )
+    [...normalizedRedirectModels].filter((m) => !normalizedCurrentModels.has(m))
   )
 
   return {

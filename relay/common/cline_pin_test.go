@@ -1,12 +1,53 @@
 package common
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"testing"
 
+	hostcommon "github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func TestClineUnpinnedBodyRetainsReplay(t *testing.T) {
+	for _, pin := range []dto.ClineUpstreamPin{{}, {Exclude: []string{"deepseek"}}, {Upstreams: []string{"deepseek"}, Exclude: []string{"deepseek"}}, {Sort: "none"}} {
+		info := newClineRelayInfo("requested", map[string]dto.ClineUpstreamPin{"requested": pin})
+		payload := []byte(`{"model":"requested","max_tokens":0,"stream":false,"id":9007199254740993}`)
+		body, closer, err := NewOutboundJSONBody(payload)
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, closer.Close()) })
+		out := ApplyClineUpstreamPinReader(body, info)
+		replayable, ok := out.(hostcommon.ReplayableBody)
+		require.True(t, ok, "no pin must preserve the body replay contract used by HTTP transport retries")
+		assert.Equal(t, int64(len(payload)), replayable.Size())
+		got, err := io.ReadAll(out)
+		require.NoError(t, err)
+		assert.Equal(t, payload, got)
+		replay, err := replayable.NewReader()
+		require.NoError(t, err)
+		got, err = io.ReadAll(replay)
+		require.NoError(t, err)
+		require.NoError(t, replay.Close())
+		assert.Equal(t, payload, got)
+	}
+}
+
+func BenchmarkClineUnpinnedBody(b *testing.B) {
+	payload := append([]byte(`{"model":"requested","messages":[{"role":"user","content":"`), bytes.Repeat([]byte("a"), 1<<20)...)
+	payload = append(payload, []byte(`"}]}`)...)
+	info := newClineRelayInfo("requested", nil)
+	b.ReportAllocs()
+	b.SetBytes(int64(len(payload)))
+	for b.Loop() {
+		body := ApplyClineUpstreamPinReader(bytes.NewReader(payload), info)
+		_, err := io.Copy(io.Discard, body)
+		require.NoError(b, err)
+	}
+}
 
 func newClineRelayInfo(model string, pins map[string]dto.ClineUpstreamPin) *RelayInfo {
 	info := &RelayInfo{}

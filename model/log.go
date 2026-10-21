@@ -7,6 +7,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/setting/redact_setting"
 	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
@@ -115,6 +116,9 @@ func formatUserLogs(logs []*Log, startIdx int) {
 	for i := range logs {
 		logs[i].ChannelName = ""
 		logs[i].Other = formatLogOtherJSON(logs[i].Other, logOtherVisibilityUser)
+		// A configured keyword may appear in the requested model name itself, so
+		// the user projection applies the same masking as the response path.
+		logs[i].ModelName = redact_setting.MaskModel(logs[i].ModelName)
 	}
 	assignDisplayLogIds(logs, startIdx)
 }

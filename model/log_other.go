@@ -18,11 +18,17 @@ const (
 
 // legacySensitiveLogOtherKeys are historical top-level fields that must never
 // be written via SetPublic and must be stripped from user-visible projections.
+// upstream_model_name and response_model are listed because releases before the
+// administrator-scope split wrote them into the public top level; existing rows
+// keep that shape, and stripping them here stops an old row from revealing the
+// provider to its owner.
 var legacySensitiveLogOtherKeys = []string{
 	"channel_id",
 	"channel_name",
 	"channel_type",
 	"reject_reason",
+	"upstream_model_name",
+	"response_model",
 }
 
 type logOtherVisibility int

@@ -2882,7 +2882,8 @@ export function ChannelMutateDrawer({
         {currentType === CHANNEL_TYPE_CLINE && (
           <ClineProbePanel
             channelId={channelId ?? undefined}
-            models={parseModelsString(form.getValues('models') || '')}
+            models={currentModelsArray}
+            modelMapping={currentModelMapping}
             disabled={sensitiveLocked || isSubmitting}
           />
         )}

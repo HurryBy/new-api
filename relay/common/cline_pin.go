@@ -125,10 +125,16 @@ func ApplyClineUpstreamPin(jsonData []byte, info *RelayInfo) ([]byte, error) {
 	return out, nil
 }
 
-// ApplyClineUpstreamPinReader 读入 JSON 请求体、应用钉选后返回新的 reader。
-// 原 reader 必然被读完，因此无论成功与否都返回可再次读取的 reader。
+// ApplyClineUpstreamPinReader 仅在有有效钉选时读取并重写 JSON 请求体。
+// 无需钉选时保留原 reader；重写后返回可再次读取的 reader。
 func ApplyClineUpstreamPinReader(body io.Reader, info *RelayInfo) io.Reader {
 	if body == nil || info == nil || info.ChannelType != constant.ChannelTypeCline {
+		return body
+	}
+	// Most requests have no matching pin. Preserve the original storage and its
+	// replay metadata instead of copying a potentially disk-backed agent context.
+	pin, ok := lookupClinePin(info)
+	if !ok || len(filterClineUpstreams(pin.Upstreams, pin.Exclude)) == 0 && normalizeClineSort(pin.Sort) == "" {
 		return body
 	}
 	raw, err := io.ReadAll(body)

@@ -1220,22 +1220,27 @@ func RemoveDisabledFields(jsonData []byte, channelOtherSettings dto.ChannelOther
 }
 
 func hasRemovableDisabledField(jsonData []byte, channelOtherSettings dto.ChannelOtherSettings) bool {
-	values := gjson.GetManyBytes(
-		jsonData,
-		"service_tier",
-		"inference_geo",
-		"speed",
-		"store",
-		"safety_identifier",
-		"stream_options.include_obfuscation",
-	)
-
-	return (!channelOtherSettings.AllowServiceTier && values[0].Exists()) ||
-		(!channelOtherSettings.AllowInferenceGeo && values[1].Exists()) ||
-		(!channelOtherSettings.AllowSpeed && values[2].Exists()) ||
-		(channelOtherSettings.DisableStore && values[3].Exists()) ||
-		(!channelOtherSettings.AllowSafetyIdentifier && values[4].Exists()) ||
-		(!channelOtherSettings.AllowIncludeObfuscation && values[5].Exists())
+	// GetMany scans the whole document once per path. Inspect top-level keys
+	// once, without copying or decoding large messages/input values.
+	found := false
+	gjson.GetBytes(jsonData, "@keys").ForEach(func(_, key gjson.Result) bool {
+		switch key.String() {
+		case "service_tier":
+			found = !channelOtherSettings.AllowServiceTier
+		case "inference_geo":
+			found = !channelOtherSettings.AllowInferenceGeo
+		case "speed":
+			found = !channelOtherSettings.AllowSpeed
+		case "store":
+			found = channelOtherSettings.DisableStore
+		case "safety_identifier":
+			found = !channelOtherSettings.AllowSafetyIdentifier
+		case "stream_options":
+			found = !channelOtherSettings.AllowIncludeObfuscation && gjson.GetBytes(jsonData, "stream_options.include_obfuscation").Exists()
+		}
+		return !found
+	})
+	return found
 }
 
 // RemoveGeminiDisabledFields removes disabled fields from Gemini request JSON data

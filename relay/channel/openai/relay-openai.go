@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relay/channel/openrouter"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -18,7 +20,45 @@ import (
 	"github.com/QuantumNous/new-api/tokenkit"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
+
+// replaceResponseModel replaces the top-level "model" field of one JSON response
+// body. A body without that field, or one that does not parse, is returned
+// unchanged so a provider's own framing is never altered.
+func replaceResponseModel(body []byte, model string) []byte {
+	if model == "" || len(body) == 0 || !bytes.Contains(body, []byte(`"model"`)) {
+		return body
+	}
+	if !gjson.ValidBytes(body) {
+		return body
+	}
+	current := gjson.GetBytes(body, "model")
+	if current.Type != gjson.String || current.Str == model {
+		return body
+	}
+	// Rewrite only the model span: decoding arbitrary upstream numbers through
+	// map[string]any both costs a full re-encode per token and loses integer precision.
+	rewritten, err := sjson.SetBytes(body, "model", model)
+	if err != nil {
+		return body
+	}
+	return rewritten
+}
+
+// rewriteStreamModel replaces the "model" field of one streamed chat chunk with
+// the model the client requested, leaving any chunk without that field untouched.
+func rewriteStreamModel(info *relaycommon.RelayInfo, data string) string {
+	if info == nil {
+		return data
+	}
+	requested := info.ClientModelName("")
+	if requested == "" {
+		return data
+	}
+	return string(replaceResponseModel([]byte(data), requested))
+}
 
 func sendStreamData(c *gin.Context, info *relaycommon.RelayInfo, data string, forceFormat bool, thinkToContent bool) error {
 	if data == "" {
@@ -26,13 +66,14 @@ func sendStreamData(c *gin.Context, info *relaycommon.RelayInfo, data string, fo
 	}
 
 	if !forceFormat && !thinkToContent {
-		return helper.StringData(c, data)
+		return helper.StringData(c, rewriteStreamModel(info, data))
 	}
 
 	var lastStreamResponse dto.ChatCompletionsStreamResponse
 	if err := common.UnmarshalJsonStr(data, &lastStreamResponse); err != nil {
 		return err
 	}
+	lastStreamResponse.Model = info.ClientModelName(lastStreamResponse.Model)
 
 	if !thinkToContent {
 		return helper.ObjectData(c, lastStreamResponse)
@@ -118,15 +159,17 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	var toolCount int
 	var usage = &dto.Usage{}
 	var lastStreamData string
+	var lastStreamSent bool
 	var secondLastStreamData string // 保留倒数第二个stream data；部分兼容网关把完整usage放在倒数第二个事件
 	seenStreamToolCalls := make(map[string]struct{})
 	var streamFunctionCallNames []string
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
-		if lastStreamData != "" {
+		if lastStreamData != "" && !lastStreamSent {
 			if err := HandleStreamFormat(c, info, lastStreamData, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent); err != nil {
 				common.SysLog(common.LogText("error handling stream format: %s", err.Error()))
-				sr.Error(err)
+				sr.Stop(err)
+				return
 			}
 		}
 		if len(data) > 0 {
@@ -135,10 +178,46 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 			}
 
 			lastStreamData = data
-			observeStreamChoices(info, data, seenStreamToolCalls, &streamFunctionCallNames)
-			if err := processTokenData(info, data, &responseTextBuilder, &toolCount); err != nil {
-				logger.LogError(c, common.LogText("error processing stream token data: %s", err.Error()))
-				sr.Error(err)
+			lastStreamSent = false
+			streamResponse, tokenErr := observeStreamChoices(info, data, seenStreamToolCalls, &streamFunctionCallNames)
+			if info.RelayMode == relayconstant.RelayModeChatCompletions {
+				if tokenErr == nil {
+					info.ObserveResponseModel(streamResponse.Model)
+					tokenErr = ProcessStreamResponse(streamResponse, &responseTextBuilder, &toolCount)
+				}
+			} else {
+				tokenErr = processTokenData(info, data, &responseTextBuilder, &toolCount)
+			}
+			if tokenErr != nil {
+				logger.LogError(c, common.LogText("error processing stream token data: %s", tokenErr.Error()))
+				sr.Error(tokenErr)
+			}
+			// Content must not wait for another upstream event, which can arrive
+			// seconds later during reasoning or a tool call. Keep only metadata and
+			// usage-only frames pending for the existing final-usage handling.
+			if info.RelayFormat == types.RelayFormatOpenAI {
+				for _, choice := range streamResponse.Choices {
+					delta := choice.Delta
+					if delta.Role != "" || delta.GetContentString() != "" || delta.GetReasoningContent() != "" ||
+						delta.Reasoning != nil && *delta.Reasoning != "" || len(delta.ToolCalls) > 0 {
+						lastStreamSent = true
+						break
+					}
+				}
+				// Legacy completion text and function_call are not in the chat DTO.
+				if !lastStreamSent {
+					for _, choice := range gjson.Get(data, "choices").Array() {
+						if choice.Get("delta.function_call").Exists() || choice.Get("text").String() != "" {
+							lastStreamSent = true
+							break
+						}
+					}
+				}
+				if lastStreamSent {
+					if err := HandleStreamFormat(c, info, data, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent); err != nil {
+						sr.Stop(err)
+					}
+				}
 			}
 		}
 	})
@@ -176,7 +255,7 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	}
 
 	if info.RelayFormat == types.RelayFormatOpenAI {
-		if shouldSendLastResp {
+		if shouldSendLastResp && !lastStreamSent {
 			_ = sendStreamData(c, info, lastStreamData, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent)
 		}
 	}
@@ -199,10 +278,10 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 
 // observeStreamChoices collects billable function call names and records the
 // finish reason facts used by health sampling from one parsed chunk.
-func observeStreamChoices(info *relaycommon.RelayInfo, data string, seen map[string]struct{}, names *[]string) {
+func observeStreamChoices(info *relaycommon.RelayInfo, data string, seen map[string]struct{}, names *[]string) (dto.ChatCompletionsStreamResponse, error) {
 	var streamResponse dto.ChatCompletionsStreamResponse
 	if err := common.UnmarshalJsonStr(data, &streamResponse); err != nil {
-		return
+		return streamResponse, err
 	}
 	for _, choice := range streamResponse.Choices {
 		if choice.FinishReason != nil && *choice.FinishReason != "" {
@@ -247,6 +326,7 @@ func observeStreamChoices(info *relaycommon.RelayInfo, data string, seen map[str
 			*names = append(*names, name)
 		}
 	}
+	return streamResponse, nil
 }
 
 func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
@@ -284,6 +364,8 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 	}
 
 	info.ObserveResponseModel(simpleResponse.Model)
+	// Report the model the client asked for, not the upstream's own declaration.
+	simpleResponse.Model = info.ClientModelName(simpleResponse.Model)
 	for _, choice := range simpleResponse.Choices {
 		if choice.FinishReason == constant.FinishReasonContentFilter {
 			info.PerformanceBusinessRejection = true
@@ -333,15 +415,19 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 				return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 			}
 			bodyMap["usage"] = simpleResponse.Usage
+			// The client-facing model must be the requested one, so rewrite it on the
+			// same decode pass rather than re-encoding the body a second time.
+			bodyMap["model"] = simpleResponse.Model
 			responseBody, _ = common.Marshal(bodyMap)
-		}
-		if forceFormat {
+		} else if forceFormat {
 			responseBody, err = common.Marshal(simpleResponse)
 			if err != nil {
 				return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 			}
 		} else {
-			break
+			// The passthrough body is the upstream's own bytes, so the model field has
+			// to be replaced in place; otherwise the upstream name reaches the client.
+			responseBody = replaceResponseModel(responseBody, simpleResponse.Model)
 		}
 	case types.RelayFormatClaude:
 		convertResult, err := service.ConvertResponse(c, info, types.RelayFormatClaude, &simpleResponse)

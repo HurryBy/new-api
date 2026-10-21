@@ -15,6 +15,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/setting/redact_setting"
 	"github.com/QuantumNous/new-api/setting/system_setting"
 
 	"github.com/gin-gonic/gin"
@@ -277,4 +278,31 @@ func TestRequestPolicyEventsReachLogAdminInfo(t *testing.T) {
 	other := model.NewLogOther()
 	AppendRelayLogAdminInfo(untouched, nil, other)
 	assert.NotContains(t, other.Snapshot()["admin_info"], "request_policy", "requests without decisions do not carry an empty record")
+}
+
+// TestRelayErrorExposesNoUpstreamKeywordToClient proves the end-to-end contract a
+// client relies on: an upstream provider name configured for redaction never
+// reaches the error text, while address masking still runs alongside it.
+func TestRelayErrorExposesNoUpstreamKeywordToClient(t *testing.T) {
+	previous := redact_setting.GetRedactSetting()
+	t.Cleanup(func() { redact_setting.ApplySetting(previous) })
+
+	redact_setting.ApplySetting(redact_setting.RedactSetting{
+		Enabled:           true,
+		Patterns:          []string{"acme-internal"},
+		Mask:              "***",
+		MaskErrorMessages: true,
+		MaskModelNames:    true,
+	})
+
+	apiErr := types.NewOpenAIError(
+		errors.New("acme-internal rejected the request from https://private.example.com/v1"),
+		types.ErrorCodeBadResponseStatusCode,
+		http.StatusBadGateway,
+	)
+
+	masked := apiErr.MaskSensitiveErrorWithStatusCode("https://private.example.com")
+	assert.NotContains(t, masked, "acme-internal", "the configured provider keyword is redacted")
+	assert.NotContains(t, masked, "private.example.com", "the upstream address stays masked")
+	assert.Contains(t, masked, "***", "the replacement text is visible")
 }

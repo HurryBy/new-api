@@ -141,6 +141,252 @@ function candidate(upstream: string, pressed: boolean) {
 }
 
 describe('ClineProbePanel', () => {
+  it.each(['{', '[]', '{"alias":42}', '{"alias":"other","other":"alias"}'])(
+    'keeps configured models usable for an invalid mapping %s',
+    async (modelMapping) => {
+      renderPanel({ models: ['alias'], modelMapping })
+      const input = await screen.findByRole('combobox', {
+        name: 'Pinned upstreams for alias',
+      })
+      await waitFor(() => expect(input).toBeEnabled())
+      expect(putMock).not.toHaveBeenCalled()
+    }
+  )
+
+  it('uses the target snapshot and pin when aliases collide, preserving all other saved entries on an explicit save', async () => {
+    const aliasPin = { upstreams: ['legacy-provider'], sort: 'tps' }
+    const targetPin = {
+      upstreams: ['target-provider'],
+      sort: 'cost',
+      exclude: ['excluded'],
+    }
+    mockGets({
+      snapshot: {
+        sampledAt: 1_700_000_000,
+        models: [
+          {
+            ...SNAPSHOT_MODEL,
+            upstreams: [{ upstream: 'target-candidate', status: 'ok' }],
+          },
+          {
+            model: 'alias',
+            upstreams: [{ upstream: 'outdated-candidate', status: 'ok' }],
+          },
+        ],
+      },
+      pins: { alias: aliasPin, [MODEL]: targetPin },
+    })
+    putMock.mockResolvedValue({ data: { success: true } })
+    const user = userEvent.setup()
+    renderPanel({
+      models: ['alias', MODEL],
+      modelMapping: JSON.stringify({ alias: MODEL }),
+    })
+    const input = await screen.findByRole('combobox', {
+      name: `Pinned upstreams for ${MODEL}`,
+    })
+    await waitFor(() => expect(input).toBeEnabled())
+    expect(
+      screen.getAllByRole('combobox', { name: `Pinned upstreams for ${MODEL}` })
+    ).toHaveLength(1)
+    expect(
+      screen.queryByRole('button', { name: /outdated-candidate/i })
+    ).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Unpin target-provider' })
+    ).toBeInTheDocument()
+    expect(putMock).not.toHaveBeenCalled()
+    await user.click(
+      screen.getByRole('button', { name: /target-candidate/i, pressed: false })
+    )
+    await user.click(screen.getByRole('button', { name: /Save .* pins/i }))
+    await waitFor(() =>
+      expect(putMock).toHaveBeenCalledWith('/api/channel/7/cline/pins', {
+        pins: {
+          alias: aliasPin,
+          [MODEL]: {
+            ...targetPin,
+            upstreams: ['target-provider', 'target-candidate'],
+          },
+        },
+      })
+    )
+  })
+
+  it('resolves a manually entered alias to its target before probing', async () => {
+    postMock.mockResolvedValue({
+      data: { success: true, data: { models: [] } },
+    })
+    const user = userEvent.setup()
+    renderPanel({
+      models: ['alias'],
+      modelMapping: JSON.stringify({ alias: MODEL }),
+    })
+    const input = await screen.findByRole('combobox', {
+      name: 'Models to configure or probe',
+    })
+    await user.type(input, 'alias')
+    await user.keyboard('{Enter}{Escape}')
+    await user.click(screen.getByRole('button', { name: 'Probe channel' }))
+    await waitFor(() =>
+      expect(postMock).toHaveBeenCalledWith(
+        '/api/channel/7/cline/probe',
+        { models: [MODEL] },
+        expect.anything()
+      )
+    )
+    expect(putMock).not.toHaveBeenCalled()
+  })
+
+  it('shows one mapped target for configured aliases and probes only that target without rewriting pins', async () => {
+    const target = 'cline-pass/deepseek-v4.1-flash-1017'
+    const savedPins = { alias: { upstreams: ['custom-provider'], sort: 'tps' } }
+    mockGets({
+      snapshot: {
+        sampledAt: 1_700_000_000,
+        models: [{ model: 'alias' }, { model: target }],
+      },
+      pins: savedPins,
+    })
+    postMock.mockResolvedValue({
+      data: { success: true, data: { models: [] } },
+    })
+    const user = userEvent.setup()
+    renderPanel({
+      models: ['alias', 'other-alias', target],
+      modelMapping: JSON.stringify({
+        alias: 'other-alias',
+        'other-alias': target,
+      }),
+    })
+
+    const upstreamInput = await screen.findByRole('combobox', {
+      name: `Pinned upstreams for ${target}`,
+    })
+    await waitFor(() => expect(upstreamInput).toBeEnabled())
+    expect(
+      screen.getAllByRole('combobox', {
+        name: `Pinned upstreams for ${target}`,
+      })
+    ).toHaveLength(1)
+    expect(
+      screen.queryByRole('combobox', { name: 'Pinned upstreams for alias' })
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('combobox', {
+        name: 'Pinned upstreams for other-alias',
+      })
+    ).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Unpin custom-provider' })
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Save .* pins/i })).toBeNull()
+
+    await user.click(
+      screen.getByRole('combobox', { name: 'Models to configure or probe' })
+    )
+    expect(
+      screen.queryByRole('option', { name: 'alias' })
+    ).not.toBeInTheDocument()
+    expect(screen.getAllByRole('option', { name: target })).toHaveLength(1)
+    await user.keyboard('{Escape}')
+    await user.click(screen.getByRole('button', { name: /Probe again/i }))
+    await waitFor(() =>
+      expect(postMock).toHaveBeenCalledWith(
+        '/api/channel/7/cline/probe',
+        { models: [target] },
+        expect.anything()
+      )
+    )
+    expect(putMock).not.toHaveBeenCalled()
+    expect(savedPins).toEqual({
+      alias: { upstreams: ['custom-provider'], sort: 'tps' },
+    })
+  })
+  it('keeps custom pins editable after a failed save and allows retrying', async () => {
+    mockGets({})
+    putMock.mockResolvedValueOnce({
+      data: { success: false, message: 'Save rejected' },
+    })
+    putMock.mockResolvedValueOnce({ data: { success: true } })
+    const user = userEvent.setup()
+    renderPanel({ models: [MODEL] })
+    const input = await screen.findByRole('combobox', {
+      name: `Pinned upstreams for ${MODEL}`,
+    })
+    await waitFor(() => expect(input).toBeEnabled())
+    await user.click(input)
+    await user.paste(' custom-provider/eu,custom-provider/eu, ')
+    const save = screen.getByRole('button', { name: /Save 1 pin/i })
+    await user.click(save)
+    await waitFor(() => expect(save).toBeEnabled())
+    expect(
+      screen.getByRole('button', { name: 'Unpin custom-provider/eu' })
+    ).toBeInTheDocument()
+    await user.click(save)
+    await waitFor(() => expect(putMock).toHaveBeenCalledTimes(2))
+    expect(putMock).toHaveBeenLastCalledWith('/api/channel/7/cline/pins', {
+      pins: { [MODEL]: { upstreams: ['custom-provider/eu'] } },
+    })
+  })
+
+  it('accepts a custom upstream without probing and preserves other saved pins', async () => {
+    const otherPin = {
+      upstreams: ['alibaba'],
+      pin_mode: 'preferred',
+      sort: 'cost',
+    }
+    mockGets({ pins: { 'cline-pass/glm-5.2': otherPin } })
+    putMock.mockResolvedValue({ data: { success: true } })
+    const user = userEvent.setup()
+    renderPanel({ models: [MODEL] })
+
+    const input = await screen.findByRole('combobox', {
+      name: `Pinned upstreams for ${MODEL}`,
+    })
+    await waitFor(() => expect(input).toBeEnabled())
+    await user.type(input, 'custom-provider/eu')
+    expect(input).toHaveValue('custom-provider/eu')
+    await user.keyboard('{Enter}')
+    expect(
+      screen.getByRole('button', { name: 'Unpin custom-provider/eu' })
+    ).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /Save 2 pins/i }))
+
+    await waitFor(() =>
+      expect(putMock).toHaveBeenCalledWith('/api/channel/7/cline/pins', {
+        pins: {
+          'cline-pass/glm-5.2': otherPin,
+          [MODEL]: { upstreams: ['custom-provider/eu'] },
+        },
+      })
+    )
+    expect(postMock).not.toHaveBeenCalled()
+  })
+
+  it('removes an existing pin without clearing the other models', async () => {
+    mockGets({
+      snapshot: { sampledAt: 1_700_000_000, models: [SNAPSHOT_MODEL] },
+      pins: {
+        [MODEL]: { upstreams: ['fireworks'] },
+        'cline-pass/glm-5.2': { upstreams: ['alibaba'] },
+      },
+    })
+    putMock.mockResolvedValue({ data: { success: true } })
+    const user = userEvent.setup()
+    renderPanel({})
+    await user.click(
+      await screen.findByRole('button', { pressed: true, name: /fireworks/i })
+    )
+    await user.click(screen.getByRole('button', { name: /Save 1 pin/i }))
+
+    await waitFor(() =>
+      expect(putMock).toHaveBeenCalledWith('/api/channel/7/cline/pins', {
+        pins: { 'cline-pass/glm-5.2': { upstreams: ['alibaba'] } },
+      })
+    )
+  })
+
   it('disables probing until the channel has been saved', () => {
     renderPanel({ channelId: undefined })
 

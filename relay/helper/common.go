@@ -29,13 +29,14 @@ func FlushWriter(c *gin.Context) (err error) {
 		return fmt.Errorf("request context done: %w", c.Request.Context().Err())
 	}
 
-	flusher, ok := c.Writer.(http.Flusher)
-	if !ok {
-		return errors.New("streaming error: flusher not found")
+	var writer http.ResponseWriter = c.Writer
+	// Gin's Flush method drops the underlying FlushError. Preserve Gin's header
+	// bookkeeping, then let ResponseController report a failed network flush.
+	if unwrapper, ok := c.Writer.(interface{ Unwrap() http.ResponseWriter }); ok {
+		c.Writer.WriteHeaderNow()
+		writer = unwrapper.Unwrap()
 	}
-
-	flusher.Flush()
-	return nil
+	return http.NewResponseController(writer).Flush()
 }
 
 func requestContextDone(c *gin.Context) bool {
@@ -52,7 +53,7 @@ func SetEventStreamHeaders(c *gin.Context) {
 	c.Set("event_stream_headers_set", true)
 
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Cache-Control", "no-cache, no-transform")
 	c.Writer.Header().Set("Connection", "keep-alive")
 	c.Writer.Header().Set("Transfer-Encoding", "chunked")
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
@@ -62,6 +63,8 @@ func ClaudeData(c *gin.Context, resp dto.ClaudeResponse) error {
 	if requestContextDone(c) {
 		return nil
 	}
+	ExtendWriteDeadline(c)
+	defer ClearWriteDeadline(c)
 
 	jsonData, err := common.Marshal(resp)
 	if err != nil {
@@ -78,6 +81,8 @@ func ClaudeChunkData(c *gin.Context, resp dto.ClaudeResponse, data string) {
 	if requestContextDone(c) {
 		return
 	}
+	ExtendWriteDeadline(c)
+	defer ClearWriteDeadline(c)
 
 	c.Render(-1, common.CustomEvent{Data: fmt.Sprintf("event: %s\n", resp.Type)})
 	c.Render(-1, common.CustomEvent{Data: fmt.Sprintf("data: %s\n", data)})
@@ -88,6 +93,8 @@ func ResponseChunkData(c *gin.Context, resp dto.ResponsesStreamResponse, data st
 	if requestContextDone(c) {
 		return fmt.Errorf("request context done: %w", c.Request.Context().Err())
 	}
+	ExtendWriteDeadline(c)
+	defer ClearWriteDeadline(c)
 
 	c.Render(-1, common.CustomEvent{Data: fmt.Sprintf("event: %s\n", resp.Type)})
 	c.Render(-1, common.CustomEvent{Data: fmt.Sprintf("data: %s", data)})
@@ -102,8 +109,12 @@ func StringData(c *gin.Context, str string) error {
 	if requestContextDone(c) {
 		return fmt.Errorf("request context done: %w", c.Request.Context().Err())
 	}
+	ExtendWriteDeadline(c)
+	defer ClearWriteDeadline(c)
 
-	c.Render(-1, common.CustomEvent{Data: "data: " + str})
+	if _, err := c.Writer.WriteString("data: " + str + "\n\n"); err != nil {
+		return err
+	}
 	return FlushWriter(c)
 }
 
@@ -115,6 +126,8 @@ func PingData(c *gin.Context) error {
 	if requestContextDone(c) {
 		return fmt.Errorf("request context done: %w", c.Request.Context().Err())
 	}
+	ExtendWriteDeadline(c)
+	defer ClearWriteDeadline(c)
 
 	if _, err := c.Writer.Write([]byte(": PING\n\n")); err != nil {
 		return fmt.Errorf("write ping data failed: %w", err)

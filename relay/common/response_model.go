@@ -57,3 +57,17 @@ func (info *RelayInfo) ObserveResponseModel(model string) {
 	}
 	observation.ReturnedModel = model
 }
+
+// ClientModelName is the model name a response must expose to the client: the
+// model the caller asked for, never the upstream's own declaration. It falls back
+// to the observed name only when the request carried no model at all, so a
+// response is never left without one.
+func (info *RelayInfo) ClientModelName(observed string) string {
+	if info == nil {
+		return observed
+	}
+	if requested := strings.TrimSpace(info.OriginModelName); requested != "" {
+		return requested
+	}
+	return observed
+}

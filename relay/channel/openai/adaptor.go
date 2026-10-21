@@ -279,6 +279,20 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 	if info.ChannelType != constant.ChannelTypeOpenAI && info.ChannelType != constant.ChannelTypeAzure {
 		request.StreamOptions = nil
 	}
+	// Cline accepts reasoning_effort, but ignores the legacy thinking.type
+	// switch on its DeepSeek chat route. Honor an explicit opt-out without
+	// changing the default or overriding more specific reasoning controls.
+	if info.ChannelType == constant.ChannelTypeCline &&
+		strings.HasPrefix(info.UpstreamModelName, "cline-pass/deepseek-") &&
+		request.ReasoningEffort == "" && len(request.Reasoning) == 0 &&
+		request.ReasoningConversion == nil && info.ReasoningState() == nil {
+		var thinking struct {
+			Type string `json:"type"`
+		}
+		if len(request.THINKING) > 0 && common.Unmarshal(request.THINKING, &thinking) == nil && thinking.Type == "disabled" {
+			request.ReasoningEffort = "none"
+		}
+	}
 	// Nested reasoning is an OpenRouter-compatible input dialect and needs
 	// projection even without a protocol conversion hop. Native top-level
 	// reasoning_effort stays untouched unless a modifier or conversion applies.

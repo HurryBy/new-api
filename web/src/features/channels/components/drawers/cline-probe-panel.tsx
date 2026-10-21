@@ -21,13 +21,14 @@ import { HugeiconsIcon } from '@hugeicons/react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import dayjs from 'dayjs'
 import { Loader2, RefreshCw } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useId, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
 import { MultiSelect } from '@/components/multi-select'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Label } from '@/components/ui/label'
 import { handleServerError } from '@/lib/handle-server-error'
 import { cn } from '@/lib/utils'
 
@@ -44,11 +45,13 @@ import {
   type ClineUpstreamResult,
   type ClineUpstreamStatus,
 } from '../../lib/cline-probe'
+import { resolveModelMappingTargets } from '../../lib/model-mapping-validation'
 
 interface ClineProbePanelProps {
   channelId?: number
   /** Models currently configured on the channel, used as the probe target. */
   models: string[]
+  modelMapping?: string
   disabled?: boolean
   className?: string
 }
@@ -113,8 +116,10 @@ function PinnedUpstreamChip(props: {
       >
         {props.held ? t('Confirmed') : t('Pending verification')}
       </Badge>
-      <button
+      <Button
         type='button'
+        variant='ghost'
+        size='icon-xs'
         onClick={props.onRemove}
         disabled={props.disabled}
         className='text-muted-foreground hover:text-foreground disabled:opacity-50'
@@ -123,7 +128,7 @@ function PinnedUpstreamChip(props: {
         })}
       >
         ×
-      </button>
+      </Button>
     </span>
   )
 }
@@ -145,8 +150,10 @@ function CandidateUpstreamButton(props: {
   const { t } = useTranslation()
 
   return (
-    <button
+    <Button
       type='button'
+      variant='outline'
+      size='sm'
       onClick={props.onToggle}
       disabled={props.disabled}
       aria-pressed={props.pinned}
@@ -179,7 +186,7 @@ function CandidateUpstreamButton(props: {
       ) : (
         <span className='text-muted-foreground text-[10px]'>{t('Pin')}</span>
       )}
-    </button>
+    </Button>
   )
 }
 
@@ -188,9 +195,11 @@ function ModelPinSection(props: {
   snapshot: ClineProbeModelSnapshot
   pinnedUpstreams: string[]
   onToggleUpstream: (upstream: string) => void
+  onChangeUpstreams: (upstreams: string[]) => void
   disabled?: boolean
 }) {
   const { t } = useTranslation()
+  const inputId = useId()
   const upstreams = props.snapshot.upstreams ?? []
   const isHeld = (upstream: string) =>
     upstreams.some((item) => item.upstream === upstream && item.held)
@@ -223,6 +232,32 @@ function ModelPinSection(props: {
           {props.snapshot.detail ? ` — ${props.snapshot.detail}` : ''}
         </p>
       )}
+
+      <div className='space-y-1.5'>
+        <Label htmlFor={inputId} className='text-xs'>
+          {t('Pinned upstreams for {{model}}', { model: props.snapshot.model })}
+        </Label>
+        <MultiSelect
+          id={inputId}
+          aria-label={t('Pinned upstreams for {{model}}', {
+            model: props.snapshot.model,
+          })}
+          options={upstreams.map((item) => ({
+            value: item.upstream,
+            label: item.upstream,
+          }))}
+          selected={props.pinnedUpstreams}
+          onChange={props.onChangeUpstreams}
+          allowCreate
+          placeholder={t('Type an upstream name and press Enter')}
+          disabled={props.disabled}
+        />
+        <p className='text-muted-foreground text-xs'>
+          {t(
+            'Custom upstreams can be saved without probing. Only a successful probe confirms that a pin is honored.'
+          )}
+        </p>
+      </div>
 
       {props.pinnedUpstreams.length > 0 && (
         <div className='flex flex-wrap items-center gap-2'>
@@ -285,6 +320,14 @@ export function ClineProbePanel(props: ClineProbePanelProps) {
   const [isSaving, setIsSaving] = useState(false)
   const [selected, setSelected] = useState<string[]>([])
   const [draftPins, setDraftPins] = useState<ClineUpstreamPins | null>(null)
+  const modelInputId = useId()
+  const mappedModels = useMemo(
+    () => resolveModelMappingTargets(props.modelMapping ?? ''),
+    [props.modelMapping]
+  )
+  const selectedModels = [
+    ...new Set(selected.map((model) => mappedModels.get(model) ?? model)),
+  ]
 
   // Cline Pass subscription models are absent from the gateway's /v1/models, so
   // the suggestion list comes from the backend.
@@ -304,13 +347,16 @@ export function ClineProbePanel(props: ClineProbePanelProps) {
   })
 
   const modelOptions = useMemo(() => {
-    const merged = new Set<string>(catalogue.data ?? [])
-    for (const model of props.models) merged.add(model)
+    const merged = new Set(
+      [...(catalogue.data ?? []), ...props.models].map(
+        (model) => mappedModels.get(model) ?? model
+      )
+    )
     return [...merged]
       .filter(Boolean)
       .sort()
       .map((value) => ({ value, label: value }))
-  }, [catalogue.data, props.models])
+  }, [catalogue.data, props.models, mappedModels])
 
   const snapshot: ClineProbeSnapshot | null =
     snapshotQuery.data?.snapshot ?? null
@@ -322,24 +368,53 @@ export function ClineProbePanel(props: ClineProbePanelProps) {
     draftPins !== null &&
     JSON.stringify(draftPins) !== JSON.stringify(savedPins)
 
-  const pinnedFor = (model: string): string[] => pins[model]?.upstreams ?? []
+  // Preserve the saved keys and every pin option. Mapping affects presentation
+  // only; an explicit edit still updates the original entry. Exact target pins
+  // take precedence, just as they do in the relay's lookupClinePin.
+  const pinKeys = new Map<string, string>()
+  for (const key of Object.keys(pins)) {
+    const model = mappedModels.get(key) ?? key
+    if (!pinKeys.has(model) || key === model) pinKeys.set(model, key)
+  }
+  const pinnedFor = (model: string): string[] =>
+    pins[pinKeys.get(model) ?? model]?.upstreams ?? []
 
-  const toggleUpstream = (model: string, upstream: string) => {
+  const changeUpstreams = (model: string, nextUpstreams: string[]) => {
+    const pinKey = pinKeys.get(model) ?? model
     setDraftPins((current) => {
-      const base: ClineUpstreamPins = current ? { ...current } : {}
-      const existing: string[] = base[model]?.upstreams ?? []
-      const nextUpstreams = existing.includes(upstream)
-        ? existing.filter((name) => name !== upstream)
-        : [...existing, upstream]
-
-      if (nextUpstreams.length === 0) {
-        delete base[model]
+      const base: ClineUpstreamPins = { ...(current ?? savedPins) }
+      if (
+        nextUpstreams.length === 0 &&
+        !base[pinKey]?.sort &&
+        !base[pinKey]?.exclude?.length
+      ) {
+        delete base[pinKey]
       } else {
-        base[model] = { ...base[model], upstreams: nextUpstreams }
+        base[pinKey] = { ...base[pinKey], upstreams: nextUpstreams }
       }
       return base
     })
   }
+
+  const modelSnapshots = new Map<string, ClineProbeModelSnapshot>()
+  for (const entry of snapshot?.models ?? []) {
+    const model = mappedModels.get(entry.model) ?? entry.model
+    if (!modelSnapshots.has(model) || entry.model === model) {
+      modelSnapshots.set(model, { ...entry, model })
+    }
+  }
+  for (const source of [
+    ...props.models,
+    ...selectedModels,
+    ...Object.keys(pins),
+  ]) {
+    const model = mappedModels.get(source) ?? source
+    if (model && !modelSnapshots.has(model)) {
+      modelSnapshots.set(model, { model })
+    }
+  }
+  const editingDisabled =
+    props.disabled || isProbing || isSaving || !snapshotQuery.isSuccess
 
   const runProbe = async () => {
     if (!props.channelId) return
@@ -347,7 +422,13 @@ export function ClineProbePanel(props: ClineProbePanelProps) {
     try {
       const result: ClineProbeResult = await probeClineChannel(
         props.channelId,
-        selected
+        selectedModels.length > 0 || mappedModels.size === 0
+          ? selectedModels
+          : [
+              ...new Set(
+                props.models.map((model) => mappedModels.get(model) ?? model)
+              ),
+            ].filter(Boolean)
       )
       // The backend already persisted the snapshot; refresh from the server so
       // the rendered candidate list is exactly what was stored.
@@ -392,7 +473,7 @@ export function ClineProbePanel(props: ClineProbePanelProps) {
           <h4 className='text-sm font-medium'>{t('Cline upstream pins')}</h4>
           <p className='text-muted-foreground text-xs'>
             {t(
-              'Probe the channel, then click an upstream to pin it. Pins survive closing this drawer.'
+              'Enter your own upstream names or choose probe results. Save pins to keep them for your next visit.'
             )}
           </p>
         </div>
@@ -401,7 +482,7 @@ export function ClineProbePanel(props: ClineProbePanelProps) {
           variant='outline'
           size='sm'
           onClick={runProbe}
-          disabled={props.disabled || isProbing || !props.channelId}
+          disabled={props.disabled || isProbing || isSaving || !props.channelId}
         >
           {isProbing ? (
             <Loader2 className='mr-2 h-4 w-4 animate-spin' />
@@ -420,13 +501,17 @@ export function ClineProbePanel(props: ClineProbePanelProps) {
 
       {props.channelId && (
         <div className='space-y-1.5'>
-          <span className='text-xs font-medium'>{t('Models to probe')}</span>
+          <Label htmlFor={modelInputId} className='text-xs font-medium'>
+            {t('Models to configure or probe')}
+          </Label>
           <MultiSelect
+            id={modelInputId}
+            aria-label={t('Models to configure or probe')}
             options={modelOptions}
-            selected={selected}
+            selected={selectedModels}
             onChange={setSelected}
             placeholder={t('Leave empty to probe every configured model')}
-            disabled={props.disabled || isProbing}
+            disabled={props.disabled || isProbing || isSaving}
             allowCreate
           />
         </div>
@@ -442,17 +527,25 @@ export function ClineProbePanel(props: ClineProbePanelProps) {
         </p>
       )}
 
-      {snapshot?.models.length ? (
+      {props.channelId && modelSnapshots.size > 0 ? (
         <div className='space-y-3'>
-          {snapshot.models.map((model) => (
+          {[...modelSnapshots.values()].map((model) => (
             <ModelPinSection
               key={model.model}
               snapshot={model}
               pinnedUpstreams={pinnedFor(model.model)}
               onToggleUpstream={(upstream) =>
-                toggleUpstream(model.model, upstream)
+                changeUpstreams(
+                  model.model,
+                  pinnedFor(model.model).includes(upstream)
+                    ? pinnedFor(model.model).filter((name) => name !== upstream)
+                    : [...pinnedFor(model.model), upstream]
+                )
               }
-              disabled={props.disabled || isProbing}
+              onChangeUpstreams={(upstreams) =>
+                changeUpstreams(model.model, upstreams)
+              }
+              disabled={editingDisabled}
             />
           ))}
         </div>
@@ -460,7 +553,7 @@ export function ClineProbePanel(props: ClineProbePanelProps) {
         <p className='text-muted-foreground text-xs'>
           {snapshotQuery.isLoading
             ? t('Loading previous probe result')
-            : t('No probe result yet. Run a probe to see candidate upstreams.')}
+            : t('Choose or enter a model above to configure its upstreams.')}
         </p>
       )}
 
@@ -470,7 +563,7 @@ export function ClineProbePanel(props: ClineProbePanelProps) {
             type='button'
             size='sm'
             onClick={savePins}
-            disabled={props.disabled || isSaving}
+            disabled={editingDisabled}
           >
             {isSaving && <Loader2 className='mr-2 h-4 w-4 animate-spin' />}
             {t('Save {{count}} pins', { count: pinnedCount })}

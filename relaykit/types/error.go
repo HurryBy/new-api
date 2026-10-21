@@ -146,7 +146,8 @@ func (e *NewAPIError) ErrorWithStatusCode() string {
 }
 
 // MaskSensitiveError masks the upstream addresses of the channel that produced
-// the error in the error text; see kitutil.MaskSensitiveInfo.
+// the error in the error text, and applies the host-installed keyword redaction
+// to whatever remains; see kitutil.MaskSensitiveInfo and kitutil.MaskKeywords.
 func (e *NewAPIError) MaskSensitiveError(upstreamURLs ...string) string {
 	if e == nil {
 		return ""
@@ -158,7 +159,7 @@ func (e *NewAPIError) MaskSensitiveError(upstreamURLs ...string) string {
 	if e.errorCode == ErrorCodeCountTokenFailed {
 		return errStr
 	}
-	return kitutil.MaskSensitiveInfo(errStr, upstreamURLs...)
+	return kitutil.MaskKeywords(kitutil.MaskSensitiveInfo(errStr, upstreamURLs...))
 }
 
 func (e *NewAPIError) MaskSensitiveErrorWithStatusCode(upstreamURLs ...string) string {
@@ -206,7 +207,7 @@ func (e *NewAPIError) ToOpenAIError(upstreamURLs ...string) OpenAIError {
 		}
 	}
 	if e.errorCode != ErrorCodeCountTokenFailed {
-		result.Message = kitutil.MaskSensitiveInfo(result.Message, upstreamURLs...)
+		result.Message = kitutil.MaskKeywords(kitutil.MaskSensitiveInfo(result.Message, upstreamURLs...))
 	}
 	if result.Message == "" {
 		result.Message = string(e.errorType)
@@ -236,7 +237,7 @@ func (e *NewAPIError) ToClaudeError(upstreamURLs ...string) ClaudeError {
 		}
 	}
 	if e.errorCode != ErrorCodeCountTokenFailed {
-		result.Message = kitutil.MaskSensitiveInfo(result.Message, upstreamURLs...)
+		result.Message = kitutil.MaskKeywords(kitutil.MaskSensitiveInfo(result.Message, upstreamURLs...))
 	}
 	if result.Message == "" {
 		result.Message = string(e.errorType)

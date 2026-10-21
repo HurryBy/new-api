@@ -3,6 +3,7 @@ package middleware
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,6 +20,56 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestGetModelFromJSONBodyPreservesRoutingValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, model, group, wantError string
+	}{
+		{"ordinary", `{"model":"served","group":"team","messages":[{"content":"model"}]}`, "served", "team", ""},
+		{"escaped model", `{"mo\u0064el":"served","group":"team"}`, "served", "team", ""},
+		{"nested keys", `{"messages":[{"model":"nested","content":"\\\"model\\\":false"}],"model":"served"}`, "served", "", ""},
+		{"duplicate model", `{"model":"first","model":"second"}`, "", "", "model must be provided once"},
+		{"escaped duplicate", `{"model":"first","mo\u0064el":"second"}`, "", "", "model must be provided once"},
+		{"numeric model", `{"model":123}`, "", "", "field model must be a string"},
+		{"object group", `{"model":"served","group":{}}`, "", "", "field group must be a string"},
+		{"missing", `{}`, "", "", ""},
+		{"null", `{"model":null,"group":null}`, "", "", ""},
+		{"invalid tail", `{"model":"served"}broken`, "", "", "invalid JSON request body"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(tc.body))
+			c.Request.Header.Set("Content-Type", "application/json")
+			t.Cleanup(func() { common.CleanupBodyStorage(c) })
+			request, err := getModelFromJSONBody(c)
+			if tc.wantError != "" {
+				require.EqualError(t, err, tc.wantError)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.model, request.Model)
+			assert.Equal(t, tc.group, request.Group)
+			body, err := io.ReadAll(c.Request.Body)
+			require.NoError(t, err)
+			assert.Equal(t, tc.body, string(body), "routing must preserve the body for validation and relay")
+		})
+	}
+}
+
+func BenchmarkRoutingLongContext(b *testing.B) {
+	payload := `{"model":"served","messages":[{"role":"user","content":"` + strings.Repeat("a", 1<<20) + `"}]}`
+	b.ReportAllocs()
+	b.SetBytes(int64(len(payload)))
+	for b.Loop() {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(payload))
+		c.Request.Header.Set("Content-Type", "application/json")
+		request, err := getModelFromJSONBody(c)
+		require.NoError(b, err)
+		require.Equal(b, "served", request.Model)
+		common.CleanupBodyStorage(c)
+	}
+}
 
 func TestChannelMatchesExpectedTaskPluginUsesGenericChannelSetting(t *testing.T) {
 	channel := &model.Channel{Type: constant.ChannelTypeTaskPlugin}

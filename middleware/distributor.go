@@ -259,7 +259,16 @@ func getModelFromJSONBody(c *gin.Context) (*ModelRequest, error) {
 	if !gjson.ValidBytes(requestBody) {
 		return nil, errors.New("invalid JSON request body")
 	}
-	if countTopLevelJSONKey(requestBody, "model") > 1 {
+	// Use GJSON's top-level key projection instead of a separate byte-by-byte
+	// scanner over the context. Escaped names still count as duplicate keys.
+	modelKeys := 0
+	gjson.GetBytes(requestBody, "@keys").ForEach(func(_, key gjson.Result) bool {
+		if key.String() == "model" {
+			modelKeys++
+		}
+		return modelKeys < 2
+	})
+	if modelKeys > 1 {
 		return nil, errors.New("model must be provided once")
 	}
 
@@ -282,64 +291,6 @@ func getModelFromJSONBody(c *gin.Context) (*ModelRequest, error) {
 		Model: model,
 		Group: group,
 	}, nil
-}
-
-func countTopLevelJSONKey(data []byte, target string) int {
-	depth := 0
-	inString := false
-	escaped := false
-	stringStart := 0
-	expectingKey := false
-	count := 0
-	for index, current := range data {
-		if inString {
-			if escaped {
-				escaped = false
-				continue
-			}
-			if current == '\\' {
-				escaped = true
-				continue
-			}
-			if current != '"' {
-				continue
-			}
-			inString = false
-			if depth == 1 && expectingKey {
-				key := string(data[stringStart:index])
-				var decodedKey string
-				if common.Unmarshal(data[stringStart-1:index+1], &decodedKey) == nil {
-					key = decodedKey
-				}
-				cursor := index + 1
-				for cursor < len(data) && (data[cursor] == ' ' || data[cursor] == '\t' || data[cursor] == '\r' || data[cursor] == '\n') {
-					cursor++
-				}
-				if cursor < len(data) && data[cursor] == ':' && key == target {
-					count++
-				}
-				expectingKey = false
-			}
-			continue
-		}
-		switch current {
-		case '"':
-			inString = true
-			stringStart = index + 1
-		case '{':
-			depth++
-			if depth == 1 {
-				expectingKey = true
-			}
-		case '}':
-			depth--
-		case ',':
-			if depth == 1 {
-				expectingKey = true
-			}
-		}
-	}
-	return count
 }
 
 func getJSONStringValue(result gjson.Result, field string) (string, error) {

@@ -1,6 +1,7 @@
 package common
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -15,6 +16,24 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func BenchmarkRelayDisabledFieldsLongContext(b *testing.B) {
+	input := append([]byte(`{"model":"requested","messages":[{"role":"user","content":"`), bytes.Repeat([]byte("a"), 1<<20)...)
+	input = append(input, []byte(`"}],"stream":true}`)...)
+	b.ReportAllocs()
+	b.SetBytes(int64(len(input)))
+	for b.Loop() {
+		_, err := RemoveDisabledFields(input, dto.ChannelOtherSettings{}, false)
+		require.NoError(b, err)
+	}
+}
+
+func TestRemoveDisabledFieldsEscapedAndNestedKeys(t *testing.T) {
+	input := `{"messages":[{"role":"user","content":"service_tier"}],"metadata":{"service_tier":"keep"},"service\u005ftier":"flex","stream_options":{"include_usage":true,"include_obfuscation":false}}`
+	out, err := RemoveDisabledFields([]byte(input), dto.ChannelOtherSettings{}, false)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"messages":[{"role":"user","content":"service_tier"}],"metadata":{"service_tier":"keep"},"stream_options":{"include_usage":true}}`, string(out))
+}
 
 func TestApplyParamOverrideTrimPrefix(t *testing.T) {
 	// trim_prefix example:

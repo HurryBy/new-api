@@ -411,6 +411,12 @@ export type SecuritySettings = {
   'fetch_setting.allowed_ports': number[]
   'fetch_setting.apply_ip_filter_for_domain': boolean
   'token_setting.max_user_tokens': number
+  'redact_setting.enabled': boolean
+  'redact_setting.patterns': string[]
+  'redact_setting.mask': string
+  'redact_setting.mask_error_messages': boolean
+  'redact_setting.mask_model_names': boolean
+  'redact_setting.use_channel_upstream_names': boolean
 }
 
 export type UpstreamChannel = {
